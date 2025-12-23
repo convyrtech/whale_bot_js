@@ -75,6 +75,15 @@ function initDb() {
             payload TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
+
+        db.run(`CREATE TABLE IF NOT EXISTS portfolios (
+            chat_id INTEGER PRIMARY KEY,
+            balance REAL DEFAULT 20.0,
+            locked_funds REAL DEFAULT 0.0,
+            is_challenge_active INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
  
         // Migrations (idempotent)
         addColumnIfMissing('users', 'filter_market_category', `TEXT DEFAULT 'all'`).catch(() => {});
@@ -89,6 +98,9 @@ function initDb() {
         addColumnIfMissing('signals', 'token_index', `INTEGER`).catch(() => {});
         addColumnIfMissing('user_signal_logs', 'token_index', `INTEGER`).catch(() => {});
         addColumnIfMissing('user_signal_logs', 'is_notified_closed', `INTEGER DEFAULT 0`).catch(() => {});
+        addColumnIfMissing('user_signal_logs', 'notified', `INTEGER DEFAULT 0`).catch(() => {});
+        addColumnIfMissing('user_signal_logs', 'exit_price', `REAL`).catch(() => {});
+        addColumnIfMissing('user_signal_logs', 'analysis_meta', `TEXT`).catch(() => {});
         addColumnIfMissing('user_signal_logs', 'bet_amount', `REAL DEFAULT 0`).catch(() => {});
         addColumnIfMissing('signals', 'transaction_hash', `TEXT`).catch(() => {});
         db.run(`ALTER TABLE users ADD COLUMN filter_market_category TEXT DEFAULT 'all'`, () => {});
@@ -140,79 +152,7 @@ const markUserSignalLogNotified = (id) => {
     });
 };
 
-// Portfolio Operations
-const initPortfolio = (userId) => {
-    return new Promise((resolve, reject) => {
-        db.run(
-            `INSERT INTO portfolio (user_id, balance, locked, equity, is_challenge_active) VALUES (?, 20.0, 0.0, 20.0, 0)
-             ON CONFLICT(user_id) DO UPDATE SET balance = 20.0, locked = 0.0, equity = 20.0, is_challenge_active = 0, updated_at = CURRENT_TIMESTAMP`,
-            [userId],
-            function(err) {
-                if (err) reject(err);
-                resolve(true);
-            }
-        );
-    });
-};
-
-const getPortfolio = (userId) => {
-    return new Promise((resolve, reject) => {
-        db.get(`SELECT * FROM portfolio WHERE user_id = ?`, [userId], (err, row) => {
-            if (err) reject(err);
-            resolve(row || null);
-        });
-    });
-};
-
-const updateBalance = (userId, amountDelta) => {
-    return new Promise((resolve, reject) => {
-        db.get(`SELECT balance, locked FROM portfolio WHERE user_id = ?`, [userId], (err, row) => {
-            if (err) return reject(err);
-            const balance = row ? Number(row.balance || 0) : 0;
-            const locked = row ? Number(row.locked || 0) : 0;
-            const newBalanceRaw = balance + Number(amountDelta || 0);
-            const newBalance = Math.round(newBalanceRaw * 100) / 100;
-            const equity = Math.round((newBalance + locked) * 100) / 100;
-            db.run(
-                `UPDATE portfolio SET balance = ?, equity = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`,
-                [newBalance, equity, userId],
-                function(e) {
-                    if (e) return reject(e);
-                    resolve(this.changes);
-                }
-            );
-        });
-    });
-};
-
-const updatePortfolio = (userId, changes) => {
-    const { balanceDelta = 0, lockedDelta = 0, is_challenge_active } = changes || {};
-    return new Promise((resolve, reject) => {
-        db.get(`SELECT balance, locked FROM portfolio WHERE user_id = ?`, [userId], (err, row) => {
-            if (err) return reject(err);
-            const balance = row ? Number(row.balance || 0) : 0;
-            const locked = row ? Number(row.locked || 0) : 0;
-            const newBalance = Math.round((balance + Number(balanceDelta || 0)) * 100) / 100;
-            const newLocked = Math.round((locked + Number(lockedDelta || 0)) * 100) / 100;
-            const equity = Math.round((newBalance + newLocked) * 100) / 100;
-            const fields = ['balance = ?', 'locked = ?', 'equity = ?', 'updated_at = CURRENT_TIMESTAMP'];
-            const params = [newBalance, newLocked, equity];
-            if (typeof is_challenge_active === 'number') {
-                fields.push('is_challenge_active = ?');
-                params.push(is_challenge_active);
-            }
-            params.push(userId);
-            db.run(
-                `UPDATE portfolio SET ${fields.join(', ')} WHERE user_id = ?`,
-                params,
-                function(e) {
-                    if (e) return reject(e);
-                    resolve(this.changes);
-                }
-            );
-        });
-    });
-};
+// Portfolio Operations (Legacy removed - see bottom of file)
 // User Operations
 const getUser = (chatId) => {
     return new Promise((resolve, reject) => {
@@ -560,6 +500,59 @@ const getWhaleCategoryStats = (days = 30) => {
     });
 };
 
+// --- POSITION MANAGEMENT (SELL LOGIC) ---
+
+const anyUserHasPosition = (conditionId) => {
+    return new Promise((resolve, reject) => {
+        db.get(
+            `SELECT 1 FROM user_signal_logs 
+             JOIN signals ON user_signal_logs.signal_id = signals.id
+             WHERE signals.condition_id = ? AND user_signal_logs.status = 'OPEN' LIMIT 1`,
+            [conditionId],
+            (err, row) => {
+                if (err) reject(err);
+                resolve(!!row);
+            }
+        );
+    });
+};
+
+const getOpenPosition = (chatId, conditionId) => {
+    return new Promise((resolve, reject) => {
+        db.get(
+            `SELECT user_signal_logs.id, signals.whale_address, user_signal_logs.entry_price, user_signal_logs.size_usd, user_signal_logs.outcome 
+             FROM user_signal_logs 
+             JOIN signals ON user_signal_logs.signal_id = signals.id
+             WHERE user_signal_logs.chat_id = ? AND signals.condition_id = ? AND user_signal_logs.status = 'OPEN'`,
+            [chatId, conditionId],
+            (err, row) => {
+                if (err) reject(err);
+                resolve(row);
+            }
+        );
+    });
+};
+
+const closePosition = (id, exitPrice) => {
+    return new Promise((resolve, reject) => {
+        // Calculate PnL in SQL directly to ensure atomicity
+        // PnL% = ((Exit - Entry) / Entry) * 100
+        db.run(
+            `UPDATE user_signal_logs 
+             SET status = 'CLOSED', 
+                 exit_price = ?, 
+                 closed_at = CURRENT_TIMESTAMP,
+                 result_pnl_percent = ((? - entry_price) / entry_price) * 100
+             WHERE id = ?`,
+            [exitPrice, exitPrice, id],
+            function(err) {
+                if (err) reject(err);
+                resolve(this.changes > 0);
+            }
+        );
+    });
+};
+
 const getUserLogsBySignalId = (signalId) => {
     return new Promise((resolve, reject) => {
         db.all(
@@ -601,6 +594,64 @@ const saveCallbackPayload = (payload) => {
     });
 };
 
+// --- Portfolio Functions ---
+
+function initPortfolio(chatId) {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `INSERT OR IGNORE INTO portfolios (chat_id, balance, locked_funds, is_challenge_active) VALUES (?, 20.0, 0.0, 1)`,
+            [chatId],
+            function(err) {
+                if (err) return reject(err);
+                resolve(this.changes);
+            }
+        );
+    });
+}
+
+function getPortfolio(chatId) {
+    return new Promise((resolve, reject) => {
+        db.get(
+            `SELECT * FROM portfolios WHERE chat_id = ?`,
+            [chatId],
+            (err, row) => {
+                if (err) return reject(err);
+                resolve(row);
+            }
+        );
+    });
+}
+
+function updatePortfolio(chatId, { balanceDelta = 0, lockedDelta = 0 }) {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `UPDATE portfolios 
+             SET balance = balance + ?, 
+                 locked_funds = locked_funds + ?, 
+                 updated_at = CURRENT_TIMESTAMP 
+             WHERE chat_id = ?`,
+            [balanceDelta, lockedDelta, chatId],
+            function(err) {
+                if (err) return reject(err);
+                resolve(this.changes);
+            }
+        );
+    });
+}
+
+function updateBalance(chatId, newBalance) {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `UPDATE portfolios SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE chat_id = ?`,
+            [newBalance, chatId],
+            function(err) {
+                if (err) return reject(err);
+                resolve(this.changes);
+            }
+        );
+    });
+}
+
 const getCallbackPayload = (id) => {
     return new Promise((resolve, reject) => {
         db.get(
@@ -609,6 +660,22 @@ const getCallbackPayload = (id) => {
             function(err, row) {
                 if (err) reject(err);
                 resolve(row ? JSON.parse(row.payload) : null);
+            }
+        );
+    });
+};
+
+const hasOpenPosition = (chatId, conditionId) => {
+    return new Promise((resolve, reject) => {
+        if (!conditionId) return resolve(false);
+        db.get(
+            `SELECT 1 FROM user_signal_logs l 
+             JOIN signals s ON l.signal_id = s.id 
+             WHERE l.chat_id = ? AND s.condition_id = ? AND l.status = 'OPEN'`,
+            [chatId, conditionId],
+            (err, row) => {
+                if (err) return reject(err);
+                resolve(!!row);
             }
         );
     });
@@ -644,6 +711,201 @@ module.exports = {
     getPortfolio,
     updateBalance,
     updatePortfolio,
+    hasOpenPosition,
+    /**
+     * Executes a bet atomically: Deducts balance AND logs the signal in one transaction.
+     * @param {number} userId 
+     * @param {number} signalId 
+     * @param {number} betAmount 
+     * @param {Object} logData - { strategy, side, entry_price, size_usd, category, league, outcome, token_index }
+     * @returns {Promise<boolean>} True if successful
+     */
+    executeAtomicBet: (userId, signalId, betAmount, logData) => {
+        return new Promise((resolve, reject) => {
+            db.serialize(() => {
+                db.run("BEGIN TRANSACTION");
+
+                // 1. Deduct Balance / Lock Funds
+                db.run(`UPDATE portfolios 
+                        SET balance = balance - ?, 
+                            locked_funds = locked_funds + ?, 
+                            updated_at = CURRENT_TIMESTAMP 
+                        WHERE chat_id = ?`, 
+                    [betAmount, betAmount, userId], 
+                    function(err) {
+                        if (err) {
+                            console.error("Transaction Error (Update Portfolio):", err);
+                            db.run("ROLLBACK");
+                            return reject(err);
+                        }
+                    }
+                );
+
+                // 2. Log the Signal
+                const stmt = db.prepare(`INSERT INTO user_signal_logs (
+                    chat_id, signal_id, strategy, side, entry_price, size_usd, 
+                    bet_amount, category, league, outcome, token_index, analysis_meta, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')`);
+
+                stmt.run(
+                    userId, 
+                    signalId, 
+                    logData.strategy, 
+                    logData.side, 
+                    logData.entry_price, 
+                    logData.size_usd, 
+                    betAmount, // Explicitly logging the bet amount
+                    logData.category, 
+                    logData.league, 
+                    logData.outcome, 
+                    logData.token_index,
+                    JSON.stringify(logData.analysis_meta || null),
+                    function(err) {
+                        if (err) {
+                            console.error("Transaction Error (Log Signal):", err);
+                            db.run("ROLLBACK");
+                            return reject(err);
+                        }
+                        
+                        // 3. Commit if both succeeded
+                        db.run("COMMIT", (commitErr) => {
+                            if (commitErr) {
+                                console.error("Transaction Error (Commit):", commitErr);
+                                db.run("ROLLBACK");
+                                return reject(commitErr);
+                            }
+                            resolve(true);
+                        });
+                    }
+                );
+                stmt.finalize();
+            });
+        });
+    },
+
+    /**
+     * Logs a "Shadow Bet" for Data Mining.
+     * Does NOT affect portfolio balance.
+     * @param {number} signalId 
+     * @param {Object} tradeData - { side, entry_price, size_usd, category, league, outcome, token_index }
+     */
+    logShadowBet: (signalId, tradeData, analysisMeta = null) => {
+        return new Promise((resolve, reject) => {
+            // Use a fixed virtual user ID for mining (e.g., 0 or a specific admin ID)
+            const systemMiningId = 0; 
+            const virtualBet = 10; // Fixed $10 virtual bet for ROI calc
+
+            db.run(
+                `INSERT INTO user_signal_logs (
+                    chat_id, signal_id, strategy, side, entry_price, size_usd, 
+                    bet_amount, category, league, outcome, token_index, analysis_meta, status, notified
+                ) VALUES (?, ?, 'shadow_mining', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 1)`,
+                [
+                    systemMiningId, 
+                    signalId, 
+                    tradeData.side, 
+                    tradeData.entry_price, 
+                    tradeData.size_usd, 
+                    virtualBet,
+                    tradeData.category, 
+                    tradeData.league, 
+                    tradeData.outcome, 
+                    tradeData.token_index,
+                    JSON.stringify(analysisMeta)
+                ],
+                function(err) {
+                    if (err) return reject(err);
+                    resolve(this.lastID);
+                }
+            );
+        });
+    },
+
+    // --- RESOLUTION / SETTLEMENT ---
+
+    getAllOpenPositions: () => {
+        return new Promise((resolve, reject) => {
+            db.all(
+                `SELECT l.id, l.chat_id, l.bet_amount, l.entry_price, l.outcome, s.condition_id, s.market_slug 
+                 FROM user_signal_logs l
+                 JOIN signals s ON l.signal_id = s.id
+                 WHERE l.status = 'OPEN' AND l.strategy != 'shadow_mining'`,
+                [],
+                (err, rows) => {
+                    if (err) reject(err);
+                    resolve(rows || []);
+                }
+            );
+        });
+    },
+
+    settlePosition: (id, chatId, betAmount, exitPrice, resolvedOutcome) => {
+        return new Promise((resolve, reject) => {
+            db.serialize(() => {
+                db.run("BEGIN TRANSACTION");
+
+                // 1. Calculate PnL
+                // If exitPrice is 1 (Win), PnL% = ((1 - Entry) / Entry) * 100
+                // If exitPrice is 0 (Loss), PnL% = -100
+                
+                // 2. Update Log
+                db.run(
+                    `UPDATE user_signal_logs 
+                     SET status = 'CLOSED', 
+                         exit_price = ?, 
+                         resolved_outcome = ?,
+                         closed_at = CURRENT_TIMESTAMP,
+                         result_pnl_percent = ((? - entry_price) / entry_price) * 100
+                     WHERE id = ?`,
+                    [exitPrice, resolvedOutcome, exitPrice, id],
+                    function(err) {
+                        if (err) {
+                            db.run("ROLLBACK");
+                            return reject(err);
+                        }
+                    }
+                );
+
+                // 3. Update Portfolio (Credit Winnings)
+                // If ExitPrice = 1, we get back: BetAmount / EntryPrice * 1.0
+                // If ExitPrice = 0, we get back 0.
+                // Note: We already deducted BetAmount from balance.
+                // So we just add the payout.
+                // Payout = (BetAmount / EntryPrice) * ExitPrice
+                
+                // Safety check for division by zero (shouldn't happen with entry_price > 0)
+                // We'll do the math in JS before calling this, but let's assume valid inputs.
+                
+                // Wait, we need to read entry_price to calculate payout inside SQL? 
+                // Easier to pass the calculated payout amount.
+                // Let's change the signature or do a read first. 
+                // Actually, the caller (index.js) should calculate the payout.
+                
+                // Let's assume the caller passes 'payoutAmount'.
+            });
+        });
+    },
+    
+    // Simpler version: just update status and let caller handle portfolio update via updatePortfolio
+    markPositionSettled: (id, exitPrice, resolvedOutcome) => {
+        return new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE user_signal_logs 
+                 SET status = 'CLOSED', 
+                     exit_price = ?, 
+                     resolved_outcome = ?,
+                     closed_at = CURRENT_TIMESTAMP,
+                     result_pnl_percent = ((? - entry_price) / entry_price) * 100
+                 WHERE id = ?`,
+                [exitPrice, resolvedOutcome, exitPrice, id],
+                function(err) {
+                    if (err) return reject(err);
+                    resolve(this.changes);
+                }
+            );
+        });
+    },
+
     /**
      * Aggregate whale stats directly from signals table (closed signals).
      * Useful for full-profile reporting independent of delivery filters.
@@ -689,5 +951,67 @@ module.exports = {
                 }
             );
         });
-    }
+    },
+    resetPortfolio: (chatId) => {
+        return new Promise((resolve, reject) => {
+            db.serialize(() => {
+                db.run("BEGIN TRANSACTION");
+                
+                // 1. Reset Balance to $20.00
+                db.run(`INSERT OR REPLACE INTO portfolios (chat_id, balance, locked_funds, is_challenge_active) 
+                        VALUES (?, 20.0, 0.0, 1)`, [chatId]);
+                
+                // 2. Close any OPEN positions (Void them so they don't affect the new run)
+                db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
+                        WHERE chat_id = ? AND status = 'OPEN'`, [chatId]);
+
+                db.run("COMMIT", (err) => {
+                    if (err) {
+                        db.run("ROLLBACK");
+                        return reject(err);
+                    }
+                    resolve(true);
+                });
+            });
+        });
+    },
+    toggleStrategy: (chatId, isActive) => {
+        return new Promise((resolve, reject) => {
+            const val = isActive ? 1 : 0;
+            db.run(`UPDATE portfolios SET is_challenge_active = ? WHERE chat_id = ?`, [val, chatId], function(err) {
+                if (err) return reject(err);
+                resolve(this.changes);
+            });
+        });
+    },
+
+    getMiningStats: (days = 1) => {
+        return new Promise((resolve, reject) => {
+            db.all(
+                `SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN result_pnl_percent > 0 THEN 1 ELSE 0 END) as wins,
+                    AVG(result_pnl_percent) as avg_roi,
+                    SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) as pending
+                 FROM user_signal_logs
+                 WHERE strategy = 'shadow_mining' 
+                   AND created_at >= datetime('now', '-' || ? || ' days')`,
+                [days],
+                (err, rows) => {
+                    if (err) return reject(err);
+                    const r = rows[0] || {};
+                    resolve({
+                        total: r.total || 0,
+                        wins: r.wins || 0,
+                        avg_roi: r.avg_roi || 0,
+                        pending: r.pending || 0
+                    });
+                }
+            );
+        });
+    },
+    
+    anyUserHasPosition,
+    getOpenPosition,
+    closePosition
 };

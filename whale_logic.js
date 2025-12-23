@@ -1,10 +1,14 @@
 const fetch = require('node-fetch');
 const puppeteer = require('puppeteer');
 const math = require('./math_utils');
+const logger = require('./utils/logger');
 
 // Configuration
 const API_BASE_URL = 'https://data-api.polymarket.com';
-const GRAPHQL_ENDPOINT = 'https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/pnl-subgraph/0.0.14/gn';
+const GRAPHQL_ENDPOINTS = [
+    'https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/polymarket/prod/gn',
+    'https://subgraph-backup.polymarket.com/subgraphs/name/polymarket/matic-graph-fast'
+];
 const whaleCache = new Map();
 const CACHE_TTL_MS = 60 * 60 * 1000;
 setInterval(() => {
@@ -24,109 +28,279 @@ async function fetchTrades(limit = 200) {
     try {
         const response = await fetch(`${API_BASE_URL}/trades?limit=${limit}`);
         if (!response.ok) {
-            console.error(`❌ fetchTrades API Error: ${response.status} ${response.statusText}`);
+            logger.error(`❌ fetchTrades API Error: ${response.status} ${response.statusText}`);
             throw new Error(`API Error: ${response.statusText}`);
         }
         const trades = await response.json();
-        if (process.env.DEBUG_TRADES === '1') console.log(`✅ fetchTrades: Got ${trades.length} trades from API`);
+        if (process.env.DEBUG_TRADES === '1') logger.debug(`✅ fetchTrades: Got ${trades.length} trades from API`);
         return trades;
     } catch (error) {
-        console.error(`❌ fetchTrades Error (attempt 1): ${error.message}`);
+        logger.error(`❌ fetchTrades Error (attempt 1): ${error.message}`);
         try {
             await new Promise(r => setTimeout(r, 500));
             const response2 = await fetch(`${API_BASE_URL}/trades?limit=${limit}`);
             if (response2.ok) {
                 const trades = await response2.json();
-                console.log(`✅ fetchTrades retry: Got ${trades.length} trades`);
+                logger.info(`✅ fetchTrades retry: Got ${trades.length} trades`);
                 return trades;
             }
         } catch (err) {
-            console.error(`❌ fetchTrades Error (attempt 2): ${err.message}`);
+            logger.error(`❌ fetchTrades Error (attempt 2): ${err.message}`);
         }
-        console.warn('⚠️ fetchTrades returning empty array');
+        logger.warn('⚠️ fetchTrades returning empty array');
         return [];
     }
 }
 
-// 2. Fetch User History (GraphQL)
+// 2. Fetch User History (Hybrid: Goldsky Graph + Data API Fallback)
 async function fetchUserHistory(address, currentTradeValue = 0) {
     if ((currentTradeValue || 0) < 5) {
-        if (process.env.DEBUG_TRADES === '1') console.log(`[fetchUserHistory] Trade $${currentTradeValue} < $5 threshold. Skipping wallet analysis.`);
+        if (process.env.DEBUG_TRADES === '1') logger.debug(`[fetchUserHistory] Trade $${currentTradeValue} < $5 threshold. Skipping wallet analysis.`);
         return { pnl: 0, medianPnl: 0, winrate: 0, winrateLowerBound: 0, totalVolume: 0, totalTrades: 0, status: 'skipped_low_value' };
     }
-    const addrKey = String(address || '').toLowerCase();
-    const cached = whaleCache.get(addrKey);
+
+    const userId = address.toLowerCase();
+
+    // CACHE CHECK
+    const cached = whaleCache.get(userId);
     if (cached && (Date.now() - cached.timestamp) < CACHE_TTL_MS) {
         return cached.data;
     }
-    const query = `
-    {
-      userPositions(where: {user: "${address.toLowerCase()}", closed: true}, first: 1000) {
-        profit
-        outcomeIndex
-        totalBought
-      }
-    }
-    `;
-    
-    try {
-        console.log("Fetching history for: " + address);
-        const response = await fetch(GRAPHQL_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query })
-        });
-        
-        if (!response.ok) return { pnl: 0, medianPnl: 0, winrate: 0, winrateLowerBound: 0, totalVolume: 0, totalTrades: 0 };
-        const data = await response.json();
-        if (data.errors || !data.data || !data.data.userPositions) return { pnl: 0, medianPnl: 0, winrate: 0, winrateLowerBound: 0, totalVolume: 0, totalTrades: 0 };
-        
-        const positions = data.data.userPositions;
-        let totalRealizedPnl = 0;
-        let wins = 0;
-        let losses = 0;
-        let totalVolume = 0;
-        const pnlList = [];
-        
-        for (const p of positions) {
-            let pnl = math.normalizePolymarketValue(p.profit || 0);
-            const bought = math.normalizePolymarketValue(p.totalBought || 0);
-            
-            totalRealizedPnl += pnl;
-            totalVolume += bought;
-            
-            pnlList.push(pnl);
-            if (pnl > 0) wins++;
-            else if (pnl < 0) losses++;
-        }
-        
-        const closedCount = positions.length;
-        if (closedCount === 0) {
-            console.log("⚠️ No history for " + address + " (New wallet?)");
-        }
-        
-        let winrate = 0;
-        if (closedCount > 0) winrate = (wins / closedCount) * 100;
-        
-        // Quantitative Metrics
-        const medianPnl = math.calculateMedian(pnlList);
-        const winrateLowerBound = math.wilsonScoreLowerBound(wins, closedCount) * 100;
-        console.log("Stats for " + address + ": Positions=" + closedCount + ", Profit=" + totalRealizedPnl.toFixed(0));
 
-        const result = {
-            pnl: totalRealizedPnl,
+    // --- STRATEGY A: GOLDSKY GRAPHQL (The "Smart" Way) ---
+    try {
+        const result = await fetchHistoryGraphQL(userId);
+        if (result) {
+            logger.debug(`✅ Goldsky Stats for ${userId}: PnL=$${result.pnl.toFixed(0)}, WR=${result.winrate.toFixed(1)}%`);
+            whaleCache.set(userId, { data: result, timestamp: Date.now() });
+            return result;
+        }
+    } catch (e) {
+        logger.warn(`GraphQL failed for ${userId}, switching to Data API fallback.`);
+    }
+
+    // --- STRATEGY B: DATA API FALLBACK (The "Sniper" Way) ---
+    try {
+        logger.debug(`Fetching history for: ${userId} via Data API (Fallback)`);
+        const result = await fetchHistoryDataApi(userId);
+        whaleCache.set(userId, { data: result, timestamp: Date.now() });
+        return result;
+    } catch (error) {
+        logger.error('Data API Error:', error);
+        return { pnl: 0, medianPnl: 0, winrate: 0, winrateLowerBound: 0, totalVolume: 0, totalTrades: 0 };
+    }
+}
+
+// Helper: Goldsky GraphQL
+async function fetchHistoryGraphQL(userId) {
+    const query = `
+        query GetUserHistory($id: ID!) {
+            user(id: $id) {
+                userPositions(first: 200, orderBy: updated, orderDirection: desc) {
+                    buyAmount
+                    sellAmount
+                    payout
+                    market {
+                        slug
+                        question
+                    }
+                }
+            }
+        }
+    `;
+
+    // Use the first valid endpoint from our list (or just the main one)
+    const endpoint = 'https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/polymarket/prod/gn';
+    
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables: { id: userId } })
+    });
+
+    if (!response.ok) return null;
+    const json = await response.json();
+    if (!json.data || !json.data.user) return null;
+
+    const positions = json.data.user.userPositions || [];
+    if (positions.length === 0) return null;
+
+    let items = [];
+
+    for (const pos of positions) {
+        const bought = Number(pos.buyAmount) || 0;
+        const sold = Number(pos.sellAmount) || 0;
+        const payout = Number(pos.payout) || 0;
+        
+        // Only count closed or partially closed positions for PnL
+        if (sold > 0 || payout > 0) {
+            const profit = (sold + payout) - bought;
+            const market = pos.market || {};
+            const cat = categorizeMarket(market.question, market.slug);
+            
+            items.push({
+                pnl: profit,
+                volume: bought,
+                category: cat,
+                isWin: profit > 0
+            });
+        }
+    }
+
+    return calculateStats(items);
+}
+
+// Helper: Data API
+async function fetchHistoryDataApi(userId) {
+    // 1. Fetch Active Positions (for PnL)
+    const posResponse = await fetch(`https://data-api.polymarket.com/positions?user=${userId}`);
+    let positions = [];
+    if (posResponse.ok) positions = await posResponse.json();
+
+    // 2. Fetch Recent Trades (for Volume & Count)
+    const tradesResponse = await fetch(`https://data-api.polymarket.com/trades?maker_address=${userId}&limit=500`);
+    let trades = [];
+    if (tradesResponse.ok) trades = await tradesResponse.json();
+
+    if (positions.length === 0 && trades.length === 0) {
+        return calculateStats([]);
+    }
+
+    let items = [];
+
+    // A. Process Positions (Closed/Active PnL)
+    for (const p of positions) {
+        const pnl = Number(p.cashPnl) || 0;
+        const market = p.market || {};
+        const cat = categorizeMarket(market.question, market.slug);
+        
+        items.push({
+            pnl: pnl,
+            volume: 0, // Volume handled by trades
+            category: cat,
+            isWin: pnl > 0
+        });
+    }
+
+    // B. Process Trades (Volume) - Note: This is imperfect mixing, but serves the purpose
+    // Ideally we'd link trades to positions, but for now we just want volume stats.
+    // We'll add "dummy" items for volume if we want to track volume per category, 
+    // but calculateStats mainly uses volume for global. 
+    // Let's try to extract category from trades for volume tracking.
+    let volumeByCat = {};
+    let totalVolume = 0;
+    
+    for (const t of trades) {
+        const vol = (Number(t.price||0) * Number(t.size||0));
+        totalVolume += vol;
+        const cat = categorizeMarket(t.title, t.slug);
+        volumeByCat[cat] = (volumeByCat[cat] || 0) + vol;
+    }
+
+    // Merge volume into stats? 
+    // For simplicity in Data API fallback, we might just use global volume 
+    // or try to attribute it. 
+    // Let's just pass the items we have from positions for PnL/Winrate, 
+    // and pass a separate volume map if needed.
+    // Actually, calculateStats can take an optional volume override.
+    
+    const stats = calculateStats(items);
+    stats.global.totalVolume = totalVolume; // Override global volume with trade volume
+    
+    // Update category volumes
+    for (const [cat, vol] of Object.entries(volumeByCat)) {
+        if (stats[cat]) stats[cat].totalVolume = vol;
+        else stats[cat] = { ...stats.global, totalVolume: vol, totalTrades: 0, pnl: 0 }; // Stub if no positions but has volume
+    }
+
+    return stats;
+}
+
+function calculateStats(items) {
+    // Initialize categories
+    const categories = ['global', 'politics', 'sports', 'crypto', 'weather', 'other'];
+    const result = {};
+
+    categories.forEach(cat => {
+        result[cat] = {
+            pnl: 0,
+            medianPnl: 0,
+            winrate: 0,
+            winrateLowerBound: 0,
+            totalVolume: 0,
+            totalTrades: 0
+        };
+    });
+
+    // Group items
+    const groups = { global: items };
+    items.forEach(item => {
+        const c = item.category || 'other';
+        if (!groups[c]) groups[c] = [];
+        groups[c].push(item);
+    });
+
+    // Calculate for each group
+    for (const [cat, groupItems] of Object.entries(groups)) {
+        if (!result[cat]) result[cat] = { pnl: 0, medianPnl: 0, winrate: 0, winrateLowerBound: 0, totalVolume: 0, totalTrades: 0 };
+        
+        const count = groupItems.length;
+        if (count === 0) continue;
+
+        let totalPnl = 0;
+        let totalVolume = 0;
+        let wins = 0;
+        let pnls = [];
+
+        for (const item of groupItems) {
+            totalPnl += item.pnl;
+            totalVolume += item.volume;
+            if (item.isWin) wins++;
+            pnls.push(item.pnl);
+        }
+
+        // Median
+        pnls.sort((a, b) => a - b);
+        const mid = Math.floor(count / 2);
+        const medianPnl = count % 2 !== 0 ? pnls[mid] : (pnls[mid - 1] + pnls[mid]) / 2;
+
+        // Winrate
+        const winrate = (wins / count) * 100;
+
+        // Wilson Score
+        let winrateLowerBound = 0;
+        if (count > 0) {
+            const z = 1.96;
+            const phat = wins / count;
+            const lowerBound = (phat + z*z/(2*count) - z * Math.sqrt((phat*(1-phat)+z*z/(4*count))/count)) / (1 + z*z/count);
+            winrateLowerBound = Math.max(0, lowerBound * 100);
+        }
+
+        // Streak Calculation (Tilt Protection)
+        // Assumes items are roughly ordered by time (descending)
+        let currentStreak = 0;
+        for (const item of groupItems) {
+            if (item.pnl > 0) {
+                if (currentStreak >= 0) currentStreak++;
+                else break;
+            } else if (item.pnl < 0) {
+                if (currentStreak <= 0) currentStreak--;
+                else break;
+            }
+        }
+
+        result[cat] = {
+            pnl: totalPnl,
             medianPnl: medianPnl,
             winrate: winrate,
             winrateLowerBound: winrateLowerBound,
             totalVolume: totalVolume,
-            totalTrades: closedCount
+            totalTrades: count,
+            streak: currentStreak
         };
-        whaleCache.set(addrKey, { data: result, timestamp: Date.now() });
-        return result;
-    } catch (error) {
-        console.error('GraphQL Error:', error);
-        return { pnl: 0, medianPnl: 0, winrate: 0, winrateLowerBound: 0, totalVolume: 0, totalTrades: 0 };
     }
+
+    return result;
 }
 
 // 3. Generate Image (Puppeteer)
@@ -268,6 +442,70 @@ function extractLeague(title, slug) {
     return null;
 }
 
+// 5. Fetch Current Price (Pre-Flight Check)
+async function fetchCurrentPrice(conditionId, outcome) {
+    try {
+        // Using Data API to get market details
+        const response = await fetch(`${API_BASE_URL}/markets?condition_id=${conditionId}`);
+        if (!response.ok) return null;
+        
+        const data = await response.json();
+        if (!data || data.length === 0) return null;
+
+        const market = data[0];
+        if (!market.tokens) return null;
+
+        // Find the token for the outcome
+        const token = market.tokens.find(t => t.outcome === outcome);
+        if (token) {
+            return Number(token.price || 0);
+        }
+        return null;
+    } catch (e) {
+        logger.error(`[Price Check] Error fetching price for ${conditionId}: ${e.message}`);
+        return null;
+    }
+}
+
+// 6. Check Market Resolution
+async function fetchMarketStatus(conditionId) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/markets?condition_id=${conditionId}`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (!data || data.length === 0) return null;
+        
+        const m = data[0];
+        // Check if resolved
+        if (m.closed || m.resolvedBy) {
+            // Need to find the winning outcome
+            // Usually 'tokens' has 'winner': true or similar, OR we check 'question' logic.
+            // Polymarket API: 'tokens' array might have 'winner' boolean?
+            // Or check 'outcomes' field?
+            // Actually, for binary markets, if it's resolved, we need to know WHICH outcome won.
+            
+            // Let's look at the tokens.
+            // Sometimes tokens have `winner: true`.
+            if (m.tokens) {
+                const winner = m.tokens.find(t => t.winner === true);
+                if (winner) return { resolved: true, winnerOutcome: winner.outcome };
+            }
+            
+            // Fallback: Check `market.outcomes` and `market.outcomePrices`?
+            // If price is 1.0, it won.
+            if (m.tokens) {
+                const winnerByPrice = m.tokens.find(t => Number(t.price) === 1);
+                if (winnerByPrice) return { resolved: true, winnerOutcome: winnerByPrice.outcome };
+            }
+        }
+        
+        return { resolved: false };
+    } catch (e) {
+        logger.error(`[Resolution Check] Error for ${conditionId}: ${e.message}`);
+        return null;
+    }
+}
+
 module.exports = {
     fetchTrades,
     fetchUserHistory,
@@ -275,5 +513,7 @@ module.exports = {
     fmt,
     categorizeMarket,
     extractLeague,
+    fetchCurrentPrice,
+    fetchMarketStatus,
     getWhaleCacheSize: () => whaleCache.size
 };

@@ -190,13 +190,24 @@ async function checkResolutions() {
                         }
                         await db.updateUserSignalLogById(row.id, { status: 'CLOSED', result_pnl_percent: userRoi, resolved_outcome: winnerOutcome });
 
-                        // Challenge Mode portfolio settlement
+                        // --- SEPARATION LOGIC ---
                         const betAmt = Number(row.bet_amount || 0);
-                        if (betAmt > 0) {
+                        
+                        if (row.strategy === 'shadow_mining') {
+                            // TRACK A: Data Mining
+                            // Do NOTHING to portfolio. Just saved the ROI above.
+                            if (process.env.FORWARD_DEBUG === '1') console.log(`   ⛏️ Shadow Bet ${row.id} resolved. ROI: ${userRoi.toFixed(2)}%`);
+                        } 
+                        else if (betAmt > 0) {
+                            // TRACK B: Real Challenge / Portfolio
+                            // Calculate Payout and Update Balance
                             const payoutFactor = Math.max(0, 1 + (userRoi / 100));
                             const payoutUsd = Math.round(betAmt * payoutFactor * 100) / 100;
+                            
                             // Release locked and credit balance
                             await db.updatePortfolio(row.chat_id, { balanceDelta: payoutUsd, lockedDelta: -betAmt });
+                            
+                            if (process.env.FORWARD_DEBUG === '1') console.log(`   💰 Real Bet ${row.id} resolved. Payout: $${payoutUsd}`);
                         }
                     } catch (_) {}
                 }
