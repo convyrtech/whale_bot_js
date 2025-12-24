@@ -87,15 +87,40 @@ const getDashboardText = async (chatId) => {
         }
 
         const balance = (pf.balance || 0);
-        const locked = (pf.locked || 0); // Note: DB column is 'locked' now, not 'locked_funds'
-        const equity = balance + locked;
+        const locked = (pf.locked || 0); 
+
+        // --- Calculate Unrealized PnL (Mark-to-Market) ---
+        const positions = await db.getStrategyOpenPositions(chatId, strat.id);
+        let marketValue = 0;
+        
+        // Fetch prices sequentially to avoid rate limits
+        for (const pos of positions) {
+            const currentPrice = await logic.fetchCurrentPrice(pos.condition_id, pos.outcome);
+            if (currentPrice !== null) {
+                const shares = pos.bet_amount / pos.entry_price;
+                marketValue += shares * currentPrice;
+            } else {
+                marketValue += pos.bet_amount; // Fallback to cost
+            }
+        }
+        
+        // If no positions but locked funds exist (rare sync issue), use locked
+        if (positions.length === 0 && locked > 0) marketValue = locked;
+
+        const equity = balance + marketValue;
         const startBalance = 20.00;
         const pnl = ((equity - startBalance) / startBalance) * 100;
         const pnlSign = pnl >= 0 ? '+' : '';
         const icon = pnl >= 0 ? '🟢' : '🔴';
+        
+        const unrealizedPnl = marketValue - locked;
+        const unrSign = unrealizedPnl >= 0 ? '+' : '';
 
         report.push(`**${strat.name}**`);
         report.push(`   ${icon} Eq: $${equity.toFixed(2)} (${pnlSign}${pnl.toFixed(1)}%)`);
+        if (positions.length > 0) {
+            report.push(`   📊 Unr: ${unrSign}$${unrealizedPnl.toFixed(2)}`);
+        }
         report.push(`   💵 Bal: $${balance.toFixed(2)} | 🔒 Lock: $${locked.toFixed(2)}`);
         
         totalEquity += equity;

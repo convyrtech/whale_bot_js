@@ -1034,5 +1034,21 @@ module.exports = {
     
     anyUserHasPosition,
     getOpenPositions,
+
+    getStrategyOpenPositions: (chatId, strategyId) => {
+        return new Promise((resolve, reject) => {
+            db.all(
+                `SELECT l.id, l.bet_amount, l.entry_price, l.outcome, s.condition_id 
+                 FROM user_signal_logs l
+                 JOIN signals s ON l.signal_id = s.id
+                 WHERE l.chat_id = ? AND l.strategy = ? AND l.status = 'OPEN'`,
+                [chatId, strategyId],
+                (err, rows) => {
+                    if (err) reject(err);
+                    resolve(rows || []);
+                }
+            );
+        });
+    },
     closePosition
 };
