@@ -114,9 +114,9 @@ function initDb() {
         db.run(`CREATE TABLE IF NOT EXISTS strategy_portfolios (
             user_id INTEGER,
             strategy_id TEXT,
-            balance REAL DEFAULT 20.0,
+            balance REAL DEFAULT 100.0,
             locked REAL DEFAULT 0.0,
-            equity REAL DEFAULT 20.0,
+            equity REAL DEFAULT 100.0,
             is_challenge_active INTEGER DEFAULT 0,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, strategy_id)
@@ -619,7 +619,7 @@ const saveCallbackPayload = (payload) => {
 function initPortfolio(chatId, strategyId) {
     return new Promise((resolve, reject) => {
         db.run(
-            `INSERT OR IGNORE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) VALUES (?, ?, 20.0, 0.0, 1)`,
+            `INSERT OR IGNORE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) VALUES (?, ?, 100.0, 0.0, 1)`,
             [chatId, strategyId],
             function(err) {
                 if (err) return reject(err);
@@ -981,7 +981,7 @@ module.exports = {
                 if (strategyId) {
                     // Reset Specific Strategy
                     db.run(`INSERT OR REPLACE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) 
-                            VALUES (?, ?, 20.0, 0.0, 1)`, [chatId, strategyId]);
+                            VALUES (?, ?, 100.0, 0.0, 1)`, [chatId, strategyId]);
                     
                     db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
                             WHERE chat_id = ? AND strategy = ? AND status = 'OPEN'`, [chatId, strategyId]);
@@ -990,7 +990,7 @@ module.exports = {
                     // We need to know which strategies exist. For now, let's just reset the known ones or delete all rows.
                     // Better: Delete all portfolio rows for this user and re-init them later, OR update them all.
                     // Let's update all existing rows in strategy_portfolios.
-                    db.run(`UPDATE strategy_portfolios SET balance = 20.0, locked = 0.0, is_challenge_active = 1 WHERE user_id = ?`, [chatId]);
+                    db.run(`UPDATE strategy_portfolios SET balance = 100.0, locked = 0.0, is_challenge_active = 1 WHERE user_id = ?`, [chatId]);
                     
                     // Close ALL open positions for this user
                     db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 

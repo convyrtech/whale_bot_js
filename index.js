@@ -108,7 +108,7 @@ const getDashboardText = async (chatId) => {
         if (positions.length === 0 && locked > 0) marketValue = locked;
 
         const equity = balance + marketValue;
-        const startBalance = 20.00;
+        const startBalance = 100.00;
         const pnl = ((equity - startBalance) / startBalance) * 100;
         const pnlSign = pnl >= 0 ? '+' : '';
         const icon = pnl >= 0 ? '🟢' : '🔴';
@@ -151,7 +151,7 @@ bot.onText(/\/reset/, async (msg) => {
     for (const strat of strategies) {
         await db.resetPortfolio(chatId, strat.id);
     }
-    await bot.sendMessage(chatId, "🔄 **All Portfolios Reset!**\nEach strategy restored to $20.00.", { 
+    await bot.sendMessage(chatId, "🔄 **All Portfolios Reset!**\nEach strategy restored to $100.00.", { 
         parse_mode: 'Markdown',
         reply_markup: ui.mainMenu 
     });
@@ -227,7 +227,7 @@ bot.on('callback_query', async (query) => {
 
     if (data === 'cmd_reset') {
         await db.resetPortfolio(chatId);
-        await bot.answerCallbackQuery(query.id, { text: "Portfolio Reset to $20" });
+        await bot.answerCallbackQuery(query.id, { text: "Portfolio Reset to $100" });
         
         const text = await getDashboardText(chatId);
         await bot.editMessageText(text, {
