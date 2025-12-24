@@ -493,24 +493,24 @@ async function runBotLoop() {
 
                             // --- PRE-FLIGHT PRICE CHECK ---
                             const signalPrice = Number(trade.price || 0);
+                            let executionPrice = signalPrice;
+                            
                             const currentPrice = await logic.fetchCurrentPrice(condIdForSave, targetOutcome);
                             
                             if (currentPrice !== null) {
-                                // If we are inversing, the price might be totally different (1 - p)
-                                // So we should check the price of the TARGET outcome.
-                                // logic.fetchCurrentPrice should fetch the price for the target outcome.
-                                
-                                // Slippage check is tricky if we are inversing.
-                                // Let's just log the current price for now.
+                                executionPrice = currentPrice;
                                 logger.debug(`✅ [Price Check] Target: ${targetOutcome}, Current: ${currentPrice}.`);
+                            } else if (targetOutcome !== viewData._outcomeCanonical) {
+                                // Fallback for Inverse if API fails: Estimate as 1 - signalPrice
+                                executionPrice = 1.0 - signalPrice;
+                                if (executionPrice < 0) executionPrice = 0;
+                                if (executionPrice > 1) executionPrice = 1;
                             }
 
                             const logData = {
                                 strategy: strat.id, // Log the specific strategy ID
                                 side: side,
-                                entry_price: Number(trade.price || 0), // Note: This is the SIGNAL price, not necessarily our entry if we inverse.
-                                // Ideally we should record the price of the asset we are buying.
-                                // But for now, let's keep it simple.
+                                entry_price: executionPrice, // Use the ACTUAL price of the asset we are buying
                                 size_usd: tradeValueUsd,
                                 category: viewData._category,
                                 league: viewData._league,
