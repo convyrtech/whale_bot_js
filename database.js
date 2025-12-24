@@ -973,21 +973,40 @@ module.exports = {
             );
         });
     },
-    resetPortfolio: (chatId, strategyId) => {
+    resetPortfolio: (chatId, strategyId = null) => {
         return new Promise((resolve, reject) => {
             db.serialize(() => {
                 db.run("BEGIN TRANSACTION");
                 
-                // 1. Reset Balance to $20.00
-                db.run(`INSERT OR REPLACE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) 
-                        VALUES (?, ?, 20.0, 0.0, 1)`, [chatId, strategyId]);
-                
-                // 2. Close any OPEN positions (Void them so they don't affect the new run)
-                db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
-                        WHERE chat_id = ? AND strategy = ? AND status = 'OPEN'`, [chatId, strategyId]);
+                if (strategyId) {
+                    // Reset Specific Strategy
+                    db.run(`INSERT OR REPLACE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) 
+                            VALUES (?, ?, 20.0, 0.0, 1)`, [chatId, strategyId]);
+                    
+                    db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
+                            WHERE chat_id = ? AND strategy = ? AND status = 'OPEN'`, [chatId, strategyId]);
+                } else {
+                    // Reset ALL Strategies for User
+                    // We need to know which strategies exist. For now, let's just reset the known ones or delete all rows.
+                    // Better: Delete all portfolio rows for this user and re-init them later, OR update them all.
+                    // Let's update all existing rows in strategy_portfolios.
+                    db.run(`UPDATE strategy_portfolios SET balance = 20.0, locked = 0.0, is_challenge_active = 1 WHERE user_id = ?`, [chatId]);
+                    
+                    // Close ALL open positions for this user
+                    db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
+                            WHERE chat_id = ? AND status = 'OPEN'`, [chatId]);
+                }
 
                 db.run("COMMIT", (err) => {
                     if (err) {
+                        db.run("ROLLBACK");
+                        return reject(err);
+                    }
+                    resolve(true);
+                });
+            });
+        });
+    },
                         db.run("ROLLBACK");
                         return reject(err);
                     }
