@@ -46,7 +46,7 @@ module.exports = {
 
         // Penalties
         if (pnl < 0) score -= 50; // Loser penalty
-        if (winrate < 0.4) score -= 30;
+        if (winrate < 40) score -= 30; // Fix: winrate is 0-100, so check < 40%
 
         // Decision
         const shouldBet = score >= CONFIG.MIN_SCORE;
@@ -55,7 +55,7 @@ module.exports = {
             shouldBet,
             score: Math.max(0, Math.round(score)),
             reason: shouldBet 
-                ? `Sniper: Score ${score.toFixed(0)} (WR: ${(winrate*100).toFixed(0)}%, PnL: $${pnl.toFixed(0)})`
+                ? `Sniper: Score ${score.toFixed(0)} (WR: ${winrate.toFixed(0)}%, PnL: $${pnl.toFixed(0)})`
                 : `Low Score: ${score.toFixed(0)}`
         };
     }

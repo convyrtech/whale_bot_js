@@ -8,7 +8,7 @@ const logger = require('../utils/logger');
 
 const CONFIG = {
     MAX_PNL: -500,       // Must have lost at least $500
-    MAX_WINRATE: 0.35,   // Winrate must be terrible (< 35%)
+    MAX_WINRATE: 35,     // Winrate must be terrible (< 35%)
     MIN_TRADES: 10       // Must have enough trades to prove they are bad
 };
 
