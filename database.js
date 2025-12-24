@@ -1007,14 +1007,6 @@ module.exports = {
             });
         });
     },
-                        db.run("ROLLBACK");
-                        return reject(err);
-                    }
-                    resolve(true);
-                });
-            });
-        });
-    },
     toggleStrategy: (chatId, strategyId, isActive) => {
         return new Promise((resolve, reject) => {
             const val = isActive ? 1 : 0;
