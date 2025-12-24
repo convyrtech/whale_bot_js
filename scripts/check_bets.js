@@ -25,7 +25,7 @@ db.serialize(() => {
     });
 
     console.log("\nChecking portfolio balances...");
-    db.all(`SELECT * FROM portfolios`, (err, rows) => {
+    db.all(`SELECT * FROM strategy_portfolios`, (err, rows) => {
         if (err) console.error(err);
         else console.table(rows);
     });

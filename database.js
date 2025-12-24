@@ -110,14 +110,34 @@ function initDb() {
         db.run(`CREATE INDEX IF NOT EXISTS idx_user_logs_signal ON user_signal_logs(signal_id)`);
         db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_txhash ON signals(transaction_hash)`);
         db.run(`CREATE TABLE IF NOT EXISTS callback_payloads (id TEXT PRIMARY KEY, payload TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
-        // Portfolio table (Challenge Mode)
-        db.run(`CREATE TABLE IF NOT EXISTS portfolio (
-            user_id INTEGER PRIMARY KEY,
+        // Portfolio table (Challenge Mode) - Multi-Strategy
+        db.run(`CREATE TABLE IF NOT EXISTS strategy_portfolios (
+            user_id INTEGER,
+            strategy_id TEXT,
             balance REAL DEFAULT 20.0,
             locked REAL DEFAULT 0.0,
             equity REAL DEFAULT 20.0,
             is_challenge_active INTEGER DEFAULT 0,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, strategy_id)
+        )`);
+        
+        // Positions Table - Multi-Strategy
+        db.run(`CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            strategy_id TEXT DEFAULT 'default',
+            signal_id INTEGER,
+            market_slug TEXT,
+            condition_id TEXT,
+            outcome TEXT,
+            entry_price REAL,
+            bet_amount REAL,
+            status TEXT DEFAULT 'OPEN',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            notified INTEGER DEFAULT 0,
+            exit_price REAL,
+            token_index INTEGER
         )`);
         
         console.log("Database initialized.");
@@ -517,17 +537,17 @@ const anyUserHasPosition = (conditionId) => {
     });
 };
 
-const getOpenPosition = (chatId, conditionId) => {
+const getOpenPositions = (chatId, conditionId) => {
     return new Promise((resolve, reject) => {
-        db.get(
-            `SELECT user_signal_logs.id, signals.whale_address, user_signal_logs.entry_price, user_signal_logs.size_usd, user_signal_logs.outcome 
+        db.all(
+            `SELECT user_signal_logs.id, user_signal_logs.strategy, signals.whale_address, user_signal_logs.entry_price, user_signal_logs.size_usd, user_signal_logs.outcome 
              FROM user_signal_logs 
              JOIN signals ON user_signal_logs.signal_id = signals.id
              WHERE user_signal_logs.chat_id = ? AND signals.condition_id = ? AND user_signal_logs.status = 'OPEN'`,
             [chatId, conditionId],
-            (err, row) => {
+            (err, rows) => {
                 if (err) reject(err);
-                resolve(row);
+                resolve(rows || []);
             }
         );
     });
@@ -596,11 +616,11 @@ const saveCallbackPayload = (payload) => {
 
 // --- Portfolio Functions ---
 
-function initPortfolio(chatId) {
+function initPortfolio(chatId, strategyId) {
     return new Promise((resolve, reject) => {
         db.run(
-            `INSERT OR IGNORE INTO portfolios (chat_id, balance, locked_funds, is_challenge_active) VALUES (?, 20.0, 0.0, 1)`,
-            [chatId],
+            `INSERT OR IGNORE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) VALUES (?, ?, 20.0, 0.0, 1)`,
+            [chatId, strategyId],
             function(err) {
                 if (err) return reject(err);
                 resolve(this.changes);
@@ -609,11 +629,11 @@ function initPortfolio(chatId) {
     });
 }
 
-function getPortfolio(chatId) {
+function getPortfolio(chatId, strategyId) {
     return new Promise((resolve, reject) => {
         db.get(
-            `SELECT * FROM portfolios WHERE chat_id = ?`,
-            [chatId],
+            `SELECT * FROM strategy_portfolios WHERE user_id = ? AND strategy_id = ?`,
+            [chatId, strategyId],
             (err, row) => {
                 if (err) return reject(err);
                 resolve(row);
@@ -622,15 +642,15 @@ function getPortfolio(chatId) {
     });
 }
 
-function updatePortfolio(chatId, { balanceDelta = 0, lockedDelta = 0 }) {
+function updatePortfolio(chatId, strategyId, { balanceDelta = 0, lockedDelta = 0 }) {
     return new Promise((resolve, reject) => {
         db.run(
-            `UPDATE portfolios 
+            `UPDATE strategy_portfolios 
              SET balance = balance + ?, 
-                 locked_funds = locked_funds + ?, 
+                 locked = locked + ?, 
                  updated_at = CURRENT_TIMESTAMP 
-             WHERE chat_id = ?`,
-            [balanceDelta, lockedDelta, chatId],
+             WHERE user_id = ? AND strategy_id = ?`,
+            [balanceDelta, lockedDelta, chatId, strategyId],
             function(err) {
                 if (err) return reject(err);
                 resolve(this.changes);
@@ -639,11 +659,11 @@ function updatePortfolio(chatId, { balanceDelta = 0, lockedDelta = 0 }) {
     });
 }
 
-function updateBalance(chatId, newBalance) {
+function updateBalance(chatId, strategyId, newBalance) {
     return new Promise((resolve, reject) => {
         db.run(
-            `UPDATE portfolios SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE chat_id = ?`,
-            [newBalance, chatId],
+            `UPDATE strategy_portfolios SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND strategy_id = ?`,
+            [newBalance, chatId, strategyId],
             function(err) {
                 if (err) return reject(err);
                 resolve(this.changes);
@@ -665,14 +685,14 @@ const getCallbackPayload = (id) => {
     });
 };
 
-const hasOpenPosition = (chatId, conditionId) => {
+const hasOpenPosition = (chatId, strategyId, conditionId) => {
     return new Promise((resolve, reject) => {
         if (!conditionId) return resolve(false);
         db.get(
             `SELECT 1 FROM user_signal_logs l 
              JOIN signals s ON l.signal_id = s.id 
-             WHERE l.chat_id = ? AND s.condition_id = ? AND l.status = 'OPEN'`,
-            [chatId, conditionId],
+             WHERE l.chat_id = ? AND l.strategy = ? AND s.condition_id = ? AND l.status = 'OPEN'`,
+            [chatId, strategyId, conditionId],
             (err, row) => {
                 if (err) return reject(err);
                 resolve(!!row);
@@ -715,23 +735,24 @@ module.exports = {
     /**
      * Executes a bet atomically: Deducts balance AND logs the signal in one transaction.
      * @param {number} userId 
+     * @param {string} strategyId
      * @param {number} signalId 
      * @param {number} betAmount 
      * @param {Object} logData - { strategy, side, entry_price, size_usd, category, league, outcome, token_index }
      * @returns {Promise<boolean>} True if successful
      */
-    executeAtomicBet: (userId, signalId, betAmount, logData) => {
+    executeAtomicBet: (userId, strategyId, signalId, betAmount, logData) => {
         return new Promise((resolve, reject) => {
             db.serialize(() => {
                 db.run("BEGIN TRANSACTION");
 
                 // 1. Deduct Balance / Lock Funds
-                db.run(`UPDATE portfolios 
+                db.run(`UPDATE strategy_portfolios 
                         SET balance = balance - ?, 
-                            locked_funds = locked_funds + ?, 
+                            locked = locked + ?, 
                             updated_at = CURRENT_TIMESTAMP 
-                        WHERE chat_id = ?`, 
-                    [betAmount, betAmount, userId], 
+                        WHERE user_id = ? AND strategy_id = ?`, 
+                    [betAmount, betAmount, userId, strategyId], 
                     function(err) {
                         if (err) {
                             console.error("Transaction Error (Update Portfolio):", err);
@@ -750,7 +771,7 @@ module.exports = {
                 stmt.run(
                     userId, 
                     signalId, 
-                    logData.strategy, 
+                    strategyId, // Use strategyId here for consistency
                     logData.side, 
                     logData.entry_price, 
                     logData.size_usd, 
@@ -826,7 +847,7 @@ module.exports = {
     getAllOpenPositions: () => {
         return new Promise((resolve, reject) => {
             db.all(
-                `SELECT l.id, l.chat_id, l.bet_amount, l.entry_price, l.outcome, s.condition_id, s.market_slug 
+                `SELECT l.id, l.chat_id, l.strategy, l.bet_amount, l.entry_price, l.outcome, s.condition_id, s.market_slug 
                  FROM user_signal_logs l
                  JOIN signals s ON l.signal_id = s.id
                  WHERE l.status = 'OPEN' AND l.strategy != 'shadow_mining'`,
@@ -935,16 +956,16 @@ module.exports = {
         });
     },
     /**
-     * Get all challenge trades for a specific user
+     * Get all challenge trades for a specific user and strategy
      */
-    getChallengeTradesForUser: (chatId) => {
+    getChallengeTradesForUser: (chatId, strategyId) => {
         return new Promise((resolve, reject) => {
             db.all(
                 `SELECT status, result_pnl_percent, bet_amount, created_at, outcome, resolved_outcome
                  FROM user_signal_logs 
-                 WHERE chat_id = ? AND strategy = 'challenge_20'
+                 WHERE chat_id = ? AND strategy = ?
                  ORDER BY created_at DESC`,
-                [chatId],
+                [chatId, strategyId],
                 (err, rows) => {
                     if (err) return reject(err);
                     resolve(rows || []);
@@ -952,18 +973,18 @@ module.exports = {
             );
         });
     },
-    resetPortfolio: (chatId) => {
+    resetPortfolio: (chatId, strategyId) => {
         return new Promise((resolve, reject) => {
             db.serialize(() => {
                 db.run("BEGIN TRANSACTION");
                 
                 // 1. Reset Balance to $20.00
-                db.run(`INSERT OR REPLACE INTO portfolios (chat_id, balance, locked_funds, is_challenge_active) 
-                        VALUES (?, 20.0, 0.0, 1)`, [chatId]);
+                db.run(`INSERT OR REPLACE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) 
+                        VALUES (?, ?, 20.0, 0.0, 1)`, [chatId, strategyId]);
                 
                 // 2. Close any OPEN positions (Void them so they don't affect the new run)
                 db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
-                        WHERE chat_id = ? AND status = 'OPEN'`, [chatId]);
+                        WHERE chat_id = ? AND strategy = ? AND status = 'OPEN'`, [chatId, strategyId]);
 
                 db.run("COMMIT", (err) => {
                     if (err) {
@@ -975,10 +996,10 @@ module.exports = {
             });
         });
     },
-    toggleStrategy: (chatId, isActive) => {
+    toggleStrategy: (chatId, strategyId, isActive) => {
         return new Promise((resolve, reject) => {
             const val = isActive ? 1 : 0;
-            db.run(`UPDATE portfolios SET is_challenge_active = ? WHERE chat_id = ?`, [val, chatId], function(err) {
+            db.run(`UPDATE strategy_portfolios SET is_challenge_active = ? WHERE user_id = ? AND strategy_id = ?`, [val, chatId, strategyId], function(err) {
                 if (err) return reject(err);
                 resolve(this.changes);
             });
@@ -1012,6 +1033,6 @@ module.exports = {
     },
     
     anyUserHasPosition,
-    getOpenPosition,
+    getOpenPositions,
     closePosition
 };

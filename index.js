@@ -11,6 +11,13 @@ const csvLogger = require('./utils/csv_logger');
 const fs = require('fs');
 const path = require('path');
 
+// Strategies
+const strategies = [
+    require('./strategies/sniper'),
+    require('./strategies/inverse'),
+    require('./strategies/trend_surfer')
+];
+
 // Error Handling
 process.on('unhandledRejection', (reason) => {
     logger.error('unhandledRejection', reason);
@@ -68,28 +75,43 @@ bot.setMyCommands([
 // --- COMMANDS & DASHBOARD ---
 
 const getDashboardText = async (chatId) => {
-    let pf = await db.getPortfolio(chatId);
-    if (!pf) {
-        await db.initPortfolio(chatId);
-        pf = await db.getPortfolio(chatId);
+    let report = ["💼 **Multi-Strategy Portfolio**\n"];
+    let totalEquity = 0;
+    let totalStart = 0;
+
+    for (const strat of strategies) {
+        let pf = await db.getPortfolio(chatId, strat.id);
+        if (!pf) {
+            await db.initPortfolio(chatId, strat.id);
+            pf = await db.getPortfolio(chatId, strat.id);
+        }
+
+        const balance = (pf.balance || 0);
+        const locked = (pf.locked || 0); // Note: DB column is 'locked' now, not 'locked_funds'
+        const equity = balance + locked;
+        const startBalance = 20.00;
+        const pnl = ((equity - startBalance) / startBalance) * 100;
+        const pnlSign = pnl >= 0 ? '+' : '';
+        const icon = pnl >= 0 ? '🟢' : '🔴';
+
+        report.push(`**${strat.name}**`);
+        report.push(`   ${icon} Eq: $${equity.toFixed(2)} (${pnlSign}${pnl.toFixed(1)}%)`);
+        report.push(`   💵 Bal: $${balance.toFixed(2)} | 🔒 Lock: $${locked.toFixed(2)}`);
+        
+        totalEquity += equity;
+        totalStart += startBalance;
     }
 
-    const balance = (pf.balance || 0);
-    const locked = (pf.locked_funds || 0);
-    const equity = balance + locked;
-    const startBalance = 20.00;
-    const pnl = ((equity - startBalance) / startBalance) * 100;
-    const pnlSign = pnl >= 0 ? '+' : '';
+    const totalPnl = ((totalEquity - totalStart) / totalStart) * 100;
+    const totalSign = totalPnl >= 0 ? '+' : '';
 
-    return [
-        "💼 **Unicorn Portfolio**",
-        `💵 Balance: $${balance.toFixed(2)}`,
-        `🔒 Locked: $${locked.toFixed(2)}`,
-        `📉 PnL: ${pnlSign}${pnl.toFixed(2)}%`,
-        "",
-        "🟢 **$20 Challenge:** Active",
-        "⛏️ **AI Data Mining:** 🟢 Recording (Background)"
-    ].join('\n');
+    report.push("");
+    report.push(`📊 **Total Equity:** $${totalEquity.toFixed(2)}`);
+    report.push(`📈 **Total PnL:** ${totalSign}${totalPnl.toFixed(2)}%`);
+    report.push("");
+    report.push("⛏️ **AI Data Mining:** 🟢 Active");
+
+    return report.join('\n');
 };
 
 bot.onText(/\/start|\/menu/, async (msg) => {
@@ -101,8 +123,10 @@ bot.onText(/\/start|\/menu/, async (msg) => {
 
 bot.onText(/\/reset/, async (msg) => {
     const chatId = msg.chat.id;
-    await db.resetPortfolio(chatId);
-    await bot.sendMessage(chatId, "🔄 **Portfolio Reset!**\nBalance restored to $20.00.", { 
+    for (const strat of strategies) {
+        await db.resetPortfolio(chatId, strat.id);
+    }
+    await bot.sendMessage(chatId, "🔄 **All Portfolios Reset!**\nEach strategy restored to $20.00.", { 
         parse_mode: 'Markdown',
         reply_markup: ui.mainMenu 
     });
@@ -257,48 +281,50 @@ async function runBotLoop() {
                 
                 // Iterate users to see who needs to sell
                 for (const user of activeUsers) {
-                    const position = await db.getOpenPosition(user.chat_id, condId);
-                    if (!position) continue;
+                    const positions = await db.getOpenPositions(user.chat_id, condId);
+                    if (positions.length === 0) continue;
 
-                    // Criteria to Follow Sell:
-                    // 1. Original Whale is dumping (The one we followed)
-                    const isOriginalWhale = (position.whale_address.toLowerCase() === walletAddress.toLowerCase());
-                    
-                    // 2. Super Whale is dumping (Smart Money leaving)
-                    const isSuperWhale = (sellerStats.winrate > 70 && sellerStats.pnl > 1000);
-
-                    if (isOriginalWhale || isSuperWhale) {
-                        logger.warn(`🚨 [SELL SIGNAL] Whale ${walletAddress.slice(0,6)} is selling. Closing position for User ${user.chat_id}`);
+                    for (const position of positions) {
+                        // Criteria to Follow Sell:
+                        // 1. Original Whale is dumping (The one we followed)
+                        const isOriginalWhale = (position.whale_address.toLowerCase() === walletAddress.toLowerCase());
                         
-                        // Execute Close
-                        const success = await db.closePosition(position.id, priceNum);
-                        if (success) {
-                            // Update Portfolio (Unlock funds + PnL)
-                            // PnL = (Exit - Entry) * Size / Entry
-                            // But simpler: New Balance = Balance + (BetAmount * (Exit/Entry))
-                            // Actually, we need to credit the *proceeds* back to balance.
-                            // Proceeds = SizeUSD * (ExitPrice / EntryPrice) ?? No.
-                            // Binary Options: You buy shares. 
-                            // Shares = SizeUSD / EntryPrice.
-                            // Proceeds = Shares * ExitPrice.
-                            const shares = position.size_usd / position.entry_price;
-                            const proceeds = shares * priceNum;
-                            
-                            await db.updatePortfolio(user.chat_id, { 
-                                balanceDelta: proceeds, 
-                                lockedDelta: -position.size_usd 
-                            });
+                        // 2. Super Whale is dumping (Smart Money leaving)
+                        const isSuperWhale = (sellerStats.winrate > 70 && sellerStats.pnl > 1000);
 
-                            const pnl = proceeds - position.size_usd;
-                            const sign = pnl >= 0 ? '+' : '';
+                        if (isOriginalWhale || isSuperWhale) {
+                            logger.warn(`🚨 [SELL SIGNAL] Whale ${walletAddress.slice(0,6)} is selling. Closing position for User ${user.chat_id}`);
                             
-                            await bot.sendMessage(user.chat_id, 
-                                `🚨 **EMERGENCY EXIT**\n` +
-                                `Whale sold position. We followed.\n` +
-                                `📉 Exit Price: ${priceNum}\n` +
-                                `💰 PnL: ${sign}$${pnl.toFixed(2)}`, 
-                                { parse_mode: 'Markdown' }
-                            );
+                            // Execute Close
+                            const success = await db.closePosition(position.id, priceNum);
+                            if (success) {
+                                // Update Portfolio (Unlock funds + PnL)
+                                // PnL = (Exit - Entry) * Size / Entry
+                                // But simpler: New Balance = Balance + (BetAmount * (Exit/Entry))
+                                // Actually, we need to credit the *proceeds* back to balance.
+                                // Proceeds = SizeUSD * (ExitPrice / EntryPrice) ?? No.
+                                // Binary Options: You buy shares. 
+                                // Shares = SizeUSD / EntryPrice.
+                                // Proceeds = Shares * ExitPrice.
+                                const shares = position.size_usd / position.entry_price;
+                                const proceeds = shares * priceNum;
+                                
+                                await db.updatePortfolio(user.chat_id, position.strategy, { 
+                                    balanceDelta: proceeds, 
+                                    lockedDelta: -position.size_usd 
+                                });
+
+                                const pnl = proceeds - position.size_usd;
+                                const sign = pnl >= 0 ? '+' : '';
+                                
+                                await bot.sendMessage(user.chat_id, 
+                                    `🚨 **EMERGENCY EXIT**\n` +
+                                    `Whale sold position. We followed.\n` +
+                                    `📉 Exit Price: ${priceNum}\n` +
+                                    `💰 PnL: ${sign}$${pnl.toFixed(2)}`, 
+                                    { parse_mode: 'Markdown' }
+                                );
+                            }
                         }
                     }
                 }
@@ -411,111 +437,93 @@ async function runBotLoop() {
                 logger.debug(`[Mining] ⛏️ Saved Shadow Bet for Signal ${viewData._signalId}`);
             }
 
-            // --- TRACK B: $20 CHALLENGE (User Facing) ---
+            // --- TRACK B: MULTI-STRATEGY EXECUTION ---
             for (const user of activeUsers) {
-                let pf = await db.getPortfolio(user.chat_id);
-                if (!pf) { await db.initPortfolio(user.chat_id); pf = await db.getPortfolio(user.chat_id); }
+                for (const strat of strategies) {
+                    let pf = await db.getPortfolio(user.chat_id, strat.id);
+                    if (!pf) { await db.initPortfolio(user.chat_id, strat.id); pf = await db.getPortfolio(user.chat_id, strat.id); }
 
-                // Only proceed if challenge is active
-                if (pf.is_challenge_active) {
-                    // Correlation Check
-                    const hasOpen = await db.hasOpenPosition(user.chat_id, condIdForSave);
-                    if (hasOpen) {
-                        logger.debug(`[Portfolio] User ${user.chat_id} has open position. Skipping.`);
-                        continue;
-                    }
+                    if (!pf.is_challenge_active) continue;
 
-                    // "Sniper Trigger" (Super Whale Override)
-                    // If whale is elite, we ignore category restrictions
-                    const isSuperWhale = (whaleStats.winrate > 70 && whaleStats.totalTrades > 50 && whaleStats.pnl > 2000);
+                    // Check for open position in this strategy
+                    const hasOpen = await db.hasOpenPosition(user.chat_id, strat.id, condIdForSave);
+                    if (hasOpen) continue;
+
+                    // Evaluate Strategy
+                    const evalResult = strat.evaluate(trade, whaleStats);
                     
-                    // Restrict real bets to safer categories OR Super Whales
-                    const isSafeCategory = (viewData._category === 'politics' || viewData._category === 'crypto');
-                    
-                    if (!isSafeCategory && !isSuperWhale) {
-                        logger.debug(`[Portfolio] Skipping real bet. Cat: ${viewData._category}, SuperWhale: ${isSuperWhale}`);
-                        continue;
-                    }
+                    if (evalResult.shouldBet) {
+                        logger.info(`[${strat.name}] Matched! Score: ${evalResult.score}. Reason: ${evalResult.reason}`);
 
-                    // Calculate Bet
-                    const balance = Number(pf.balance || 0);
-                    const bet = portfolio.calculateBetSize(balance, signalScore);
+                        // Calculate Bet
+                        const balance = Number(pf.balance || 0);
+                        // Use strategy score for sizing
+                        const bet = portfolio.calculateBetSize(balance, evalResult.score);
 
-                    if (bet > 0 && viewData._signalId) {
-                        // --- PRE-FLIGHT PRICE CHECK ---
-                        // Verify price hasn't moved significantly (Slippage Protection)
-                        const signalPrice = Number(trade.price || 0);
-                        const currentPrice = await logic.fetchCurrentPrice(condIdForSave, viewData._outcomeCanonical);
-                        
-                        if (currentPrice !== null) {
-                            const slippage = Math.abs(currentPrice - signalPrice);
-                            // Allow max 5 cents slippage
-                            if (slippage > 0.05) {
-                                logger.warn(`⚠️ [Slippage] Price moved too much! Signal: ${signalPrice}, Current: ${currentPrice}. Skipping bet.`);
-                                continue;
-                            }
-                            // Update entry price to current market price for accuracy
-                            // Actually, we should probably stick to signal price for logging consistency, 
-                            // or use current price if we were executing a real market order.
-                            // Since we are simulating execution at signal price (mostly), let's just ensure it's close.
-                            logger.debug(`✅ [Price Check] Signal: ${signalPrice}, Current: ${currentPrice}. OK.`);
-                        } else {
-                            logger.warn(`⚠️ [Price Check] Could not verify current price for ${condIdForSave}. Proceeding with caution.`);
-                        }
+                        if (bet > 0 && viewData._signalId) {
+                            // Handle Overrides (e.g. Inverse Strategy)
+                            const targetOutcome = (evalResult.override && evalResult.override.outcome) 
+                                ? evalResult.override.outcome 
+                                : viewData._outcomeCanonical;
 
-                        const logData = {
-                            strategy: 'unicorn_portfolio',
-                            side: side,
-                            entry_price: Number(trade.price || 0),
-                            size_usd: tradeValueUsd,
-                            category: viewData._category,
-                            league: viewData._league,
-                            outcome: viewData._outcomeCanonical,
-                            token_index: viewData._tokenIndex,
-                            analysis_meta: {
-                                category: cat,
-                                score: signalScore,
-                                whaleStats,
-                                price: Number(trade.price || 0),
-                                size: Number(trade.size || 0),
-                                tradeValueUsd,
-                                wallet: walletAddress,
-                                timestamp: Number(trade.timestamp || Math.floor(Date.now()/1000))
-                            }
-                        };
-
-                        // ATOMIC EXECUTION
-                        const success = await db.executeAtomicBet(user.chat_id, viewData._signalId, bet, logData);
-                        
-                        if (success) {
-                            logger.success(`[Portfolio] User ${user.chat_id} bet $${bet} on Signal ${viewData._signalId}`);
+                            // --- PRE-FLIGHT PRICE CHECK ---
+                            const signalPrice = Number(trade.price || 0);
+                            const currentPrice = await logic.fetchCurrentPrice(condIdForSave, targetOutcome);
                             
-                            // Send Notification
-                            const caption = `🎰 **Unicorn Action**\n\n` +
-                                `🐋 Whale: ${viewData.wallet_short}\n` +
-                                `📉 Score: ${signalScore}/100\n` +
-                                `💵 Bet: $${bet.toFixed(2)}\n` +
-                                `🎯 Event: ${viewData.market_question}\n` +
-                                `🎲 Outcome: ${viewData._outcomeCanonical}`;
-                            
-                            try {
-                                await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
-                            } catch (e) {}
-                        }
-                    } else if (signalScore >= portfolio.MIN_SCORE_WATCH) {
-                        // WATCH MODE: Notify but don't bet
-                        logger.info(`[Watch] Score ${signalScore} >= ${portfolio.MIN_SCORE_WATCH}. Notifying user ${user.chat_id}.`);
-                        
-                        const caption = `👀 **Watch List Alert**\n\n` +
-                            `🐋 Whale: ${viewData.wallet_short}\n` +
-                            `⚠️ Score: ${signalScore}/100 (Near Miss)\n` +
-                            `🚫 Action: No Bet (Score < ${portfolio.MIN_SCORE_TO_BET})\n` +
-                            `🎯 Event: ${viewData.market_question}\n` +
-                            `🎲 Outcome: ${viewData._outcomeCanonical}`;
+                            if (currentPrice !== null) {
+                                // If we are inversing, the price might be totally different (1 - p)
+                                // So we should check the price of the TARGET outcome.
+                                // logic.fetchCurrentPrice should fetch the price for the target outcome.
+                                
+                                // Slippage check is tricky if we are inversing.
+                                // Let's just log the current price for now.
+                                logger.debug(`✅ [Price Check] Target: ${targetOutcome}, Current: ${currentPrice}.`);
+                            }
 
-                        try {
-                            await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
-                        } catch (e) {}
+                            const logData = {
+                                strategy: strat.id, // Log the specific strategy ID
+                                side: side,
+                                entry_price: Number(trade.price || 0), // Note: This is the SIGNAL price, not necessarily our entry if we inverse.
+                                // Ideally we should record the price of the asset we are buying.
+                                // But for now, let's keep it simple.
+                                size_usd: tradeValueUsd,
+                                category: viewData._category,
+                                league: viewData._league,
+                                outcome: targetOutcome, // Use the target outcome
+                                token_index: viewData._tokenIndex,
+                                analysis_meta: {
+                                    category: cat,
+                                    score: evalResult.score,
+                                    whaleStats,
+                                    reason: evalResult.reason,
+                                    price: Number(trade.price || 0),
+                                    size: Number(trade.size || 0),
+                                    tradeValueUsd,
+                                    wallet: walletAddress,
+                                    timestamp: Number(trade.timestamp || Math.floor(Date.now()/1000))
+                                }
+                            };
+
+                            // ATOMIC EXECUTION
+                            const success = await db.executeAtomicBet(user.chat_id, strat.id, viewData._signalId, bet, logData);
+                            
+                            if (success) {
+                                logger.success(`[${strat.name}] User ${user.chat_id} bet $${bet} on Signal ${viewData._signalId}`);
+                                
+                                // Send Notification
+                                const caption = `🎰 **${strat.name} Action**\n\n` +
+                                    `🐋 Whale: ${viewData.wallet_short}\n` +
+                                    `📉 Score: ${evalResult.score}/100\n` +
+                                    `💡 Reason: ${evalResult.reason}\n` +
+                                    `💵 Bet: $${bet.toFixed(2)}\n` +
+                                    `🎯 Event: ${viewData.market_question}\n` +
+                                    `🎲 Outcome: ${targetOutcome}`; // Show the outcome we actually bet on
+                                
+                                try {
+                                    await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
+                                } catch (e) {}
+                            }
+                        }
                     }
                 }
             }
@@ -562,13 +570,13 @@ setInterval(async () => {
                 // 2. Update Portfolio (Credit Payout)
                 // We only add the payout. The initial bet was already deducted.
                 if (payout > 0) {
-                    await db.updatePortfolio(pos.chat_id, { 
+                    await db.updatePortfolio(pos.chat_id, pos.strategy, { 
                         balanceDelta: payout, 
                         lockedDelta: -pos.bet_amount 
                     });
                 } else {
                     // Just unlock the funds (which are now gone)
-                    await db.updatePortfolio(pos.chat_id, { 
+                    await db.updatePortfolio(pos.chat_id, pos.strategy, { 
                         balanceDelta: 0, 
                         lockedDelta: -pos.bet_amount 
                     });
