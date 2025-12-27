@@ -27,6 +27,20 @@ const CATEGORY_WEIGHTS = {
     'other': 1.0
 };
 
+// VIP Whitelist (Unicorns) - Auto-generated from analysis
+const VIP_WHALES = new Set([
+    '0xa6676646a16d8c7044ea2ac7e2b9ab09eb7384fe',
+    '0xbacd00c9080a82ded56f504ee8810af732b0ab35',
+    '0x34134e7c29b654c4f53ec213e6f35808b3f05204',
+    '0x0a61e40ebf154825b164382cd932ece781cf2c6b',
+    '0x06dcaa14f57d8a0573f5dc5940565e6de667af59',
+    '0x8c29c7dfc74dcba9ce921e2d787bbf1ac61f6fff',
+    '0xf5cfe6f998d597085e366f915b140e82e0869fc6',
+    '0x689ae12e11aa489adb3605afd8f39040ff52779e',
+    '0x8fe70c889ce14f67acea5d597e3d0351d73b4f20',
+    '0x6e50e67d55ed633a4f64a05d168240ac7a23487b'
+]);
+
 // Category-specific tuning thresholds
 const CATEGORY_TUNING = {
     default: { lbBase: 30, lbTarget: 60, medTarget: 50, volTargetTrades: 20 },
@@ -112,6 +126,24 @@ function evaluateSignal(signal, whaleStats, category = 'global') {
         totalScore += 5;  // Whale is confident
     }
 
+    // 10. VIP Whitelist Bonus
+    if (VIP_WHALES.has(signal.whale_address)) {
+        totalScore += 20; // Massive boost for proven unicorns
+        logger.info(`🦄 VIP WHALE DETECTED: ${signal.whale_address} (+20 Score)`);
+    }
+
+    // 11. Blacklist Check (Anti-Loser)
+    if (stats.totalTrades > 3 && stats.winrate < 20) {
+        logger.warn(`🚫 BLACKLISTED WHALE: ${signal.whale_address} (Winrate < 20%). Score -> 0.`);
+        return 0;
+    }
+
+    // 12. Sports Filter (Strict)
+    if (category === 'sports' && stats.winrate < 50) {
+        logger.warn(`🚫 SPORTS FILTER: Whale winrate ${stats.winrate}% < 50%. Score -> 0.`);
+        return 0;
+    }
+
     logger.debug(`[Score] Context: ${context} | Streak: ${streak} | Size: $${tradeSize} | Final: ${Math.round(totalScore)}`);
 
     return Math.max(0, Math.round(totalScore));
@@ -121,9 +153,10 @@ function evaluateSignal(signal, whaleStats, category = 'global') {
  * Calculates bet size based on strict score thresholds.
  * @param {number} balance - Current available balance
  * @param {number} score - Signal score (0-100)
+ * @param {string} category - Market category
  * @returns {number} Bet amount in USD
  */
-function calculateBetSize(balance, score) {
+function calculateBetSize(balance, score, category = 'other') {
     // Strict Threshold: Skip everything below MIN_SCORE_TO_BET
     if (score < MIN_SCORE_TO_BET) {
         logger.debug(`[Portfolio] Score ${score} < ${MIN_SCORE_TO_BET}. Bet: $0`);
@@ -136,6 +169,14 @@ function calculateBetSize(balance, score) {
     } else {
         pct = 0.05; // Medium Conviction (80-89)
     }
+
+    // --- SMART SIZING (Alpha Generation) ---
+    // Double down on Politics/News/Other where we have edge
+    if (category === 'politics' || category === 'other') {
+        pct *= 2.0; 
+        logger.info(`[Smart Sizing] Doubling bet for ${category} (Edge detected)`);
+    }
+    // ---------------------------------------
 
     let bet = balance * pct;
 

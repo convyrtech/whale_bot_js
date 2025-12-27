@@ -1,4 +1,8 @@
 require('dotenv').config();
+const dns = require('dns');
+// Force IPv4 to prevent VPN leaks (common cause of ECONNRESET in Russia)
+if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
+
 process.env.NTBA_FIX_350 = process.env.NTBA_FIX_350 || '1';
 const TelegramBot = require('node-telegram-bot-api');
 const db = require('./database');
@@ -29,6 +33,15 @@ process.on('uncaughtException', (err) => {
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || 'YOUR_TELEGRAM_TOKEN';
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: { interval: 300, params: { timeout: 10 } } });
 
+// Handle Polling Errors Gracefully
+bot.on('polling_error', (error) => {
+    if (error.code === 'ETELEGRAM' && error.message.includes('409 Conflict')) {
+        logger.warn("⚠️ TELEGRAM CONFLICT: Another bot instance is running! Please close other windows.");
+    } else {
+        logger.error(`[polling_error] ${error.code}: ${error.message}`);
+    }
+});
+
 // Initialize
 db.initDb();
 
@@ -42,10 +55,10 @@ async function runSelfTest() {
 
         // 2. API Check
         const trades = await logic.fetchTrades(1);
-        if (trades && Array.isArray(trades)) {
+        if (trades && Array.isArray(trades) && trades.length > 0) {
             logger.info("✅ Polymarket API: OK");
         } else {
-            throw new Error("Polymarket API returned invalid data");
+            logger.warn("⚠️ Polymarket API: Connection unstable (Empty response), but proceeding...");
         }
 
         // 3. Logic Check
@@ -269,6 +282,10 @@ async function runBotLoop() {
         const activeUsers = await db.getAllActiveUsers();
         if (activeUsers.length === 0) return;
 
+        // Filter out invalid users (chat_id 0 or null)
+        const validUsers = activeUsers.filter(u => u.chat_id && u.chat_id !== 0);
+        if (validUsers.length === 0) return;
+
         for (const trade of trades) {
             const tradeId = trade.transactionHash || `${trade.timestamp}-${trade.maker_address}`;
             if (processedTrades.has(tradeId)) continue;
@@ -301,21 +318,22 @@ async function runBotLoop() {
 
                 // If we own it, we need to see if the seller is credible (Original Whale or Super Whale)
                 // Fetch stats for the seller
-                await new Promise(r => setTimeout(r, 250));
+                // await new Promise(r => setTimeout(r, 250)); // REMOVED DELAY FOR SPEED
                 const sellerStats = await logic.fetchUserHistory(walletAddress, tradeValueUsd);
                 
                 // Iterate users to see who needs to sell
-                for (const user of activeUsers) {
+                for (const user of validUsers) {
                     const positions = await db.getOpenPositions(user.chat_id, condId);
                     if (positions.length === 0) continue;
 
                     for (const position of positions) {
                         // Criteria to Follow Sell:
                         // 1. Original Whale is dumping (The one we followed)
-                        const isOriginalWhale = (position.whale_address.toLowerCase() === walletAddress.toLowerCase());
+                        const isOriginalWhale = (position.whale_address && position.whale_address.toLowerCase() === walletAddress.toLowerCase());
                         
                         // 2. Super Whale is dumping (Smart Money leaving)
-                        const isSuperWhale = (sellerStats.winrate > 70 && sellerStats.pnl > 1000);
+                        // Relaxed criteria: Winrate > 60% (was 70%) OR PnL > $5000 (was $1000)
+                        const isSuperWhale = (sellerStats.winrate > 60 && sellerStats.pnl > 5000);
 
                         if (isOriginalWhale || isSuperWhale) {
                             logger.warn(`🚨 [SELL SIGNAL] Whale ${walletAddress.slice(0,6)} is selling. Closing position for User ${user.chat_id}`);
@@ -387,9 +405,18 @@ async function runBotLoop() {
 
             // Determine Category EARLY
             const marketSlug = trade.slug || trade.market_slug || trade.conditionId || trade.condition_id;
+
+            // --- FILTER: SKIP 15M CRYPTO MARKETS (High Variance / Gambling) ---
+            if (marketSlug && typeof marketSlug === 'string' && (marketSlug.includes('updown-15m') || marketSlug.includes('up-or-down'))) {
+                // logger.debug(`[Filter] Skipping 15m/short-term crypto market: ${marketSlug}`);
+                continue;
+            }
+            // ------------------------------------------------------------------
+
             const cat = logic.categorizeMarket(trade.title, marketSlug);
             
             // 1. Calculate Score (Context Aware)
+            trade.whale_address = walletAddress; // Attach for portfolio manager
             const signalScore = portfolio.evaluateSignal(trade, whaleStats, cat);
             logger.info(`[Bot] Signal Score: ${signalScore}/100 for ${walletLog} [${cat}]`);
 
@@ -423,18 +450,28 @@ async function runBotLoop() {
 
             // Save Signal to DB (Global)
             if (condIdForSave) {
-                viewData._signalId = await db.saveSignal({
-                    market_slug: trade.slug || '',
-                    event_slug: trade.eventSlug || '',
-                    condition_id: condIdForSave,
-                    outcome: outcomeCanonical,
-                    side: side,
-                    entry_price: trade.price || 0,
-                    size_usd: tradeValueUsd,
-                    whale_address: walletAddress,
-                    token_index: null,
-                    transaction_hash: trade.transactionHash
-                });
+                try {
+                    viewData._signalId = await db.saveSignal({
+                        market_slug: trade.slug || '',
+                        event_slug: trade.eventSlug || '',
+                        condition_id: condIdForSave,
+                        outcome: outcomeCanonical,
+                        side: side,
+                        entry_price: trade.price || 0,
+                        size_usd: tradeValueUsd,
+                        whale_address: walletAddress,
+                        token_index: null,
+                        transaction_hash: trade.transactionHash
+                    });
+                } catch (err) {
+                    if (err.code === 'SQLITE_CONSTRAINT') {
+                        // Duplicate found during insert race condition
+                        logger.debug(`[DB] Duplicate signal skipped: ${trade.transactionHash}`);
+                        processedTrades.add(tradeId);
+                        continue;
+                    }
+                    throw err; // Rethrow other errors
+                }
             }
 
             // --- TRACK A: DATA MINING (Background) ---
@@ -463,7 +500,7 @@ async function runBotLoop() {
             }
 
             // --- TRACK B: MULTI-STRATEGY EXECUTION ---
-            for (const user of activeUsers) {
+            for (const user of validUsers) {
                 for (const strat of strategies) {
                     let pf = await db.getPortfolio(user.chat_id, strat.id);
                     if (!pf) { await db.initPortfolio(user.chat_id, strat.id); pf = await db.getPortfolio(user.chat_id, strat.id); }
@@ -482,10 +519,10 @@ async function runBotLoop() {
 
                         // Calculate Bet
                         const balance = Number(pf.balance || 0);
-                        // Use strategy score for sizing
-                        const bet = portfolio.calculateBetSize(balance, evalResult.score);
+                        // Use strategy score for sizing (OLD CALL - REMOVED)
+                        // const bet = portfolio.calculateBetSize(balance, evalResult.score);
 
-                        if (bet > 0 && viewData._signalId) {
+                        if (viewData._signalId) {
                             // Handle Overrides (e.g. Inverse Strategy)
                             const targetOutcome = (evalResult.override && evalResult.override.outcome) 
                                 ? evalResult.override.outcome 
@@ -530,29 +567,45 @@ async function runBotLoop() {
                             };
 
                             // ATOMIC EXECUTION
-                            const success = await db.executeAtomicBet(user.chat_id, strat.id, viewData._signalId, bet, logData);
+                            // Pass category to calculateBetSize inside executeAtomicBet (if needed) or calculate here
+                            // Actually, bet size is calculated above: const bet = portfolio.calculateBetSize(pf.balance, evalResult.score);
+                            // We need to update that call to include category.
                             
-                            if (success) {
-                                logger.success(`[${strat.name}] User ${user.chat_id} bet $${bet} on Signal ${viewData._signalId}`);
+                            // RE-CALCULATE BET SIZE WITH CATEGORY
+                            const smartBet = portfolio.calculateBetSize(pf.balance, evalResult.score, cat);
+                            
+                            if (smartBet > 0) {
+                                const success = await db.executeAtomicBet(user.chat_id, strat.id, viewData._signalId, smartBet, logData);
                                 
-                                // Send Notification
-                                const caption = `🎰 **${strat.name} Action**\n\n` +
-                                    `🐋 Whale: ${viewData.wallet_short}\n` +
-                                    `📉 Score: ${evalResult.score}/100\n` +
-                                    `💡 Reason: ${evalResult.reason}\n` +
-                                    `💵 Bet: $${bet.toFixed(2)}\n` +
+                                if (success) {
+                                    logger.success(`[${strat.name}] User ${user.chat_id} bet $${smartBet} on Signal ${viewData._signalId}`);
+                                    
+                                    // Send Notification
+                                    const caption = `🎰 **${strat.name} Action**\n\n` +
+                                        `🐋 Whale: ${viewData.wallet_short}\n` +
+                                        `📉 Score: ${evalResult.score}/100\n` +
+                                        `💡 Reason: ${evalResult.reason}\n` +
+                                    `💵 Bet: $${smartBet.toFixed(2)}\n` +
                                     `🎯 Event: ${viewData.market_question}\n` +
                                     `🎲 Outcome: ${targetOutcome}`; // Show the outcome we actually bet on
                                 
                                 try {
                                     await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
-                                } catch (e) {}
+                                } catch (e) {
+                                    if (e.response && e.response.statusCode === 400) {
+                                        // Chat not found or user blocked bot. Mark user inactive?
+                                        // logger.warn(`User ${user.chat_id} unreachable. Skipping.`);
+                                    } else {
+                                        logger.error(`Failed to send notification to ${user.chat_id}: ${e.message}`);
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
     } catch (err) {
         logger.error("Bot Loop Error:", err);
     } finally {
@@ -568,58 +621,82 @@ runBotLoop();
 // Resolution Checker (Every 5 minutes)
 setInterval(async () => {
     try {
+        // 1. Resolve Active User Positions
         const openPositions = await db.getAllOpenPositions();
-        if (openPositions.length === 0) return;
-
-        logger.debug(`[Resolution] Checking ${openPositions.length} open positions...`);
-        
-        for (const pos of openPositions) {
-            // Rate limit protection
-            await new Promise(r => setTimeout(r, 200));
+        if (openPositions.length > 0) {
+            logger.debug(`[Resolution] Checking ${openPositions.length} open positions...`);
             
-            const status = await logic.fetchMarketStatus(pos.condition_id);
-            if (status && status.resolved) {
-                const didWin = (status.winnerOutcome === pos.outcome);
-                const exitPrice = didWin ? 1.0 : 0.0;
-                const pnlPercent = ((exitPrice - pos.entry_price) / pos.entry_price) * 100;
+            for (const pos of openPositions) {
+                // Rate limit protection
+                await new Promise(r => setTimeout(r, 200));
                 
-                // Calculate Payout
-                // Shares = BetAmount / EntryPrice
-                // Payout = Shares * ExitPrice
-                const shares = pos.bet_amount / pos.entry_price;
-                const payout = shares * exitPrice;
-                
-                // 1. Mark as Settled in DB
-                await db.markPositionSettled(pos.id, exitPrice, status.winnerOutcome);
-                
-                // 2. Update Portfolio (Credit Payout)
-                // We only add the payout. The initial bet was already deducted.
-                if (payout > 0) {
-                    await db.updatePortfolio(pos.chat_id, pos.strategy, { 
-                        balanceDelta: payout, 
-                        lockedDelta: -pos.bet_amount 
-                    });
-                } else {
-                    // Just unlock the funds (which are now gone)
-                    await db.updatePortfolio(pos.chat_id, pos.strategy, { 
-                        balanceDelta: 0, 
-                        lockedDelta: -pos.bet_amount 
-                    });
-                }
+                const status = await logic.fetchMarketStatus(pos.condition_id);
+                if (status && status.resolved) {
+                    const didWin = (status.winnerOutcome === pos.outcome);
+                    const exitPrice = didWin ? 1.0 : 0.0;
+                    const pnlPercent = ((exitPrice - pos.entry_price) / pos.entry_price) * 100;
+                    
+                    // Calculate Payout
+                    // Shares = BetAmount / EntryPrice
+                    // Payout = Shares * ExitPrice
+                    const shares = pos.bet_amount / pos.entry_price;
+                    const payout = shares * exitPrice;
+                    
+                    // 1. Mark as Settled in DB
+                    await db.markPositionSettled(pos.id, exitPrice, status.winnerOutcome);
+                    
+                    // 2. Update Portfolio (Credit Payout)
+                    // We only add the payout. The initial bet was already deducted.
+                    if (payout > 0) {
+                        await db.updatePortfolio(pos.chat_id, pos.strategy, { 
+                            balanceDelta: payout, 
+                            lockedDelta: -pos.bet_amount 
+                        });
+                    } else {
+                        // Just unlock the funds (which are now gone)
+                        await db.updatePortfolio(pos.chat_id, pos.strategy, { 
+                            balanceDelta: 0, 
+                            lockedDelta: -pos.bet_amount 
+                        });
+                    }
 
-                // 3. Notify User
-                const sign = pnlPercent >= 0 ? '+' : '';
-                const msg = pnlPercent >= 0 
-                    ? `🏁 **EVENT RESOLVED: WIN!**\nEvent: ${pos.market_slug}\nOutcome: ${pos.outcome}\nResult: ${sign}${pnlPercent.toFixed(0)}%\nPayout: $${payout.toFixed(2)}`
-                    : `🏁 **EVENT RESOLVED: LOSS.**\nEvent: ${pos.market_slug}\nOutcome: ${pos.outcome}\nResult: -100%`;
-                
-                try {
-                    await bot.sendMessage(pos.chat_id, msg, { parse_mode: 'Markdown' });
-                } catch (e) {}
-                
-                logger.info(`[Resolution] Position ${pos.id} settled. PnL: ${pnlPercent.toFixed(0)}%`);
+                    // 3. Notify User
+                    const sign = pnlPercent >= 0 ? '+' : '';
+                    const msg = pnlPercent >= 0 
+                        ? `🏁 **EVENT RESOLVED: WIN!**\nEvent: ${pos.market_slug}\nOutcome: ${pos.outcome}\nResult: ${sign}${pnlPercent.toFixed(0)}%\nPayout: $${payout.toFixed(2)}`
+                        : `🏁 **EVENT RESOLVED: LOSS.**\nEvent: ${pos.market_slug}\nOutcome: ${pos.outcome}\nResult: -100%`;
+                    
+                    try {
+                        await bot.sendMessage(pos.chat_id, msg, { parse_mode: 'Markdown' });
+                    } catch (e) {}
+                    
+                    logger.info(`[Resolution] Position ${pos.id} settled. PnL: ${pnlPercent.toFixed(0)}%`);
+                }
             }
         }
+
+        // 2. Resolve Shadow Mining Bets (Silent)
+        const miningBets = await db.getUnresolvedMiningBets();
+        if (miningBets.length > 0) {
+            // Process in batches to avoid spamming API
+            // Only check 10 at a time per cycle to be safe
+            const batch = miningBets.slice(0, 10);
+            
+            for (const bet of batch) {
+                await new Promise(r => setTimeout(r, 200));
+                const status = await logic.fetchMarketStatus(bet.condition_id);
+                
+                if (status && status.resolved) {
+                    const didWin = (status.winnerOutcome === bet.outcome);
+                    const exitPrice = didWin ? 1.0 : 0.0;
+                    
+                    // Just mark as settled. No portfolio update, no notification.
+                    await db.markMiningBetSettled(bet.id, exitPrice, status.winnerOutcome);
+                    logger.debug(`[Mining] ⛏️ Shadow Bet ${bet.id} resolved. Result: ${didWin ? 'WIN' : 'LOSS'}`);
+                }
+            }
+        }
+
     } catch (e) {
         logger.error("Resolution Check Error:", e);
     }

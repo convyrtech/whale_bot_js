@@ -23,10 +23,17 @@ setInterval(() => {
 // Format Currency
 const fmt = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(num);
 
+const HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json',
+    'Origin': 'https://polymarket.com',
+    'Referer': 'https://polymarket.com/'
+};
+
 // 1. Fetch Trades
 async function fetchTrades(limit = 200) {
     try {
-        const response = await fetch(`${API_BASE_URL}/trades?limit=${limit}`);
+        const response = await fetch(`${API_BASE_URL}/trades?limit=${limit}`, { headers: HEADERS });
         if (!response.ok) {
             logger.error(`❌ fetchTrades API Error: ${response.status} ${response.statusText}`);
             throw new Error(`API Error: ${response.statusText}`);
@@ -35,9 +42,13 @@ async function fetchTrades(limit = 200) {
         if (process.env.DEBUG_TRADES === '1') logger.debug(`✅ fetchTrades: Got ${trades.length} trades from API`);
         return trades;
     } catch (error) {
-        logger.error(`❌ fetchTrades Error (attempt 1): ${error.message}`);
+        if (error.code === 'ECONNRESET' || error.message.includes('ECONNRESET')) {
+            logger.warn("⚠️ NETWORK ERROR (ECONNRESET): Connection blocked. Please enable VPN!");
+        } else {
+            logger.error(`❌ fetchTrades Error (attempt 1): ${error.message}`);
+        }
         try {
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 2000)); // Wait longer for network issues
             const response2 = await fetch(`${API_BASE_URL}/trades?limit=${limit}`);
             if (response2.ok) {
                 const trades = await response2.json();
@@ -153,12 +164,12 @@ async function fetchHistoryGraphQL(userId) {
 // Helper: Data API
 async function fetchHistoryDataApi(userId) {
     // 1. Fetch Active Positions (for PnL)
-    const posResponse = await fetch(`https://data-api.polymarket.com/positions?user=${userId}`);
+    const posResponse = await fetch(`https://data-api.polymarket.com/positions?user=${userId}`, { headers: HEADERS });
     let positions = [];
     if (posResponse.ok) positions = await posResponse.json();
 
     // 2. Fetch Recent Trades (for Volume & Count)
-    const tradesResponse = await fetch(`https://data-api.polymarket.com/trades?maker_address=${userId}&limit=500`);
+    const tradesResponse = await fetch(`https://data-api.polymarket.com/trades?maker_address=${userId}&limit=500`, { headers: HEADERS });
     let trades = [];
     if (tradesResponse.ok) trades = await tradesResponse.json();
 

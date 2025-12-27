@@ -38,12 +38,12 @@ module.exports = {
             
             // Confidence is high if they are really bad
             let score = 80; 
-            if (winrate < 0.2) score = 95; // Super bad trader
+            if (winrate < 20) score = 95; // Super bad trader (< 20%)
 
             return {
                 shouldBet: true,
                 score: score,
-                reason: `Inverse: Loser found (PnL: $${pnl.toFixed(0)}, WR: ${(winrate*100).toFixed(0)}%)`,
+                reason: `Inverse: Loser found (PnL: $${pnl.toFixed(0)}, WR: ${winrate.toFixed(0)}%)`,
                 override: {
                     outcome: inverseOutcome
                 }

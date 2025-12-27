@@ -860,6 +860,22 @@ module.exports = {
         });
     },
 
+    getUnresolvedMiningBets: () => {
+        return new Promise((resolve, reject) => {
+            db.all(
+                `SELECT l.id, l.entry_price, l.outcome, s.condition_id 
+                 FROM user_signal_logs l
+                 JOIN signals s ON l.signal_id = s.id
+                 WHERE l.status = 'OPEN' AND l.strategy = 'shadow_mining'`,
+                [],
+                (err, rows) => {
+                    if (err) reject(err);
+                    resolve(rows || []);
+                }
+            );
+        });
+    },
+
     settlePosition: (id, chatId, betAmount, exitPrice, resolvedOutcome) => {
         return new Promise((resolve, reject) => {
             db.serialize(() => {
@@ -912,6 +928,25 @@ module.exports = {
         return new Promise((resolve, reject) => {
             db.run(
                 `UPDATE user_signal_logs 
+                 SET status = 'CLOSED', 
+                     exit_price = ?, 
+                     resolved_outcome = ?,
+                     closed_at = CURRENT_TIMESTAMP,
+                     result_pnl_percent = ((? - entry_price) / entry_price) * 100
+                 WHERE id = ?`,
+                [exitPrice, resolvedOutcome, exitPrice, id],
+                function(err) {
+                    if (err) return reject(err);
+                    resolve(this.changes);
+                }
+            );
+        });
+    },
+
+    markMiningBetSettled: (id, exitPrice, resolvedOutcome) => {
+        return new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE shadow_mining 
                  SET status = 'CLOSED', 
                      exit_price = ?, 
                      resolved_outcome = ?,
@@ -1043,8 +1078,54 @@ module.exports = {
         });
     },
     
-    anyUserHasPosition,
-    getOpenPositions,
+    anyUserHasPosition: (conditionId) => {
+        return new Promise((resolve, reject) => {
+            db.get(
+                `SELECT 1 FROM user_signal_logs l
+                 JOIN signals s ON l.signal_id = s.id
+                 WHERE s.condition_id = ? AND l.status = 'OPEN' LIMIT 1`,
+                [conditionId],
+                (err, row) => {
+                    if (err) reject(err);
+                    resolve(!!row);
+                }
+            );
+        });
+    },
+
+    getOpenPositions: (chatId, conditionId) => {
+        return new Promise((resolve, reject) => {
+            db.all(
+                `SELECT l.id, l.bet_amount, l.entry_price, l.size_usd, l.strategy, s.whale_address 
+                 FROM user_signal_logs l
+                 JOIN signals s ON l.signal_id = s.id
+                 WHERE l.chat_id = ? AND s.condition_id = ? AND l.status = 'OPEN'`,
+                [chatId, conditionId],
+                (err, rows) => {
+                    if (err) reject(err);
+                    resolve(rows || []);
+                }
+            );
+        });
+    },
+
+    closePosition: (logId, exitPrice) => {
+        return new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE user_signal_logs 
+                 SET status = 'CLOSED_SELL', 
+                     exit_price = ?, 
+                     closed_at = CURRENT_TIMESTAMP,
+                     result_pnl_percent = ((? - entry_price) / entry_price) * 100
+                 WHERE id = ?`,
+                [exitPrice, exitPrice, logId],
+                function(err) {
+                    if (err) return reject(err);
+                    resolve(this.changes > 0);
+                }
+            );
+        });
+    },
 
     getStrategyOpenPositions: (chatId, strategyId) => {
         return new Promise((resolve, reject) => {
