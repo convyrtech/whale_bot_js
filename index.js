@@ -250,6 +250,45 @@ bot.on('callback_query', async (query) => {
             reply_markup: ui.mainMenu
         });
     }
+
+    if (data === 'cmd_stats') {
+        await bot.answerCallbackQuery(query.id, { text: "Loading stats..." });
+
+        try {
+            const stratStats = await db.getStrategyStats(7);
+            const catStats = await db.getCategoryLeagueStats(7);
+
+            let lines = ["📊 **Strategy Performance (7 days)**\n"];
+
+            // Strategy stats
+            for (const s of stratStats) {
+                if (s.strategy === 'shadow_mining') continue;
+                const wr = s.total > 0 ? ((s.wins / s.total) * 100).toFixed(0) : 0;
+                const roiSign = s.avg_roi_capped >= 0 ? '+' : '';
+                const icon = s.avg_roi_capped >= 0 ? '🟢' : '🔴';
+                lines.push(`${icon} **${s.strategy}**`);
+                lines.push(`   ${s.total} trades | ${wr}% WR | ${roiSign}${s.avg_roi_capped.toFixed(0)}% ROI`);
+            }
+
+            lines.push("\n📈 **Category Performance (7 days)**\n");
+
+            // Top 8 categories by volume
+            const topCats = catStats.slice(0, 8);
+            for (const c of topCats) {
+                const wr = c.total > 0 ? ((c.wins / c.total) * 100).toFixed(0) : 0;
+                const roiSign = c.avg_roi_capped >= 0 ? '+' : '';
+                const icon = Number(wr) >= 50 ? '✅' : '❌';
+                const league = c.league ? ` (${c.league})` : '';
+                lines.push(`${icon} ${c.category}${league}: ${c.total} | ${wr}% | ${roiSign}${c.avg_roi_capped.toFixed(0)}%`);
+            }
+
+            lines.push("\n_WR = Winrate, ROI = Return on Investment_");
+
+            await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (e) {
+            await bot.sendMessage(chatId, "❌ Error loading stats: " + e.message);
+        }
+    }
 });
 
 // --- MAIN LOOP ---

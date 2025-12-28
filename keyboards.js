@@ -1,7 +1,8 @@
 const mainMenu = {
     inline_keyboard: [
         [
-            { text: "🔄 Reset Challenge ($20)", callback_data: "cmd_reset" }
+            { text: "📊 Stats", callback_data: "cmd_stats" },
+            { text: "🔄 Reset", callback_data: "cmd_reset" }
         ]
     ]
 };
