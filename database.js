@@ -946,13 +946,13 @@ module.exports = {
     markMiningBetSettled: (id, exitPrice, resolvedOutcome) => {
         return new Promise((resolve, reject) => {
             db.run(
-                `UPDATE shadow_mining 
+                `UPDATE user_signal_logs 
                  SET status = 'CLOSED', 
                      exit_price = ?, 
                      resolved_outcome = ?,
                      closed_at = CURRENT_TIMESTAMP,
                      result_pnl_percent = ((? - entry_price) / entry_price) * 100
-                 WHERE id = ?`,
+                 WHERE id = ? AND strategy = 'shadow_mining'`,
                 [exitPrice, resolvedOutcome, exitPrice, id],
                 function(err) {
                     if (err) return reject(err);

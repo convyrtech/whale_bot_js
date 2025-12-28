@@ -100,12 +100,12 @@ const getDashboardText = async (chatId) => {
         }
 
         const balance = (pf.balance || 0);
-        const locked = (pf.locked || 0); 
+        const locked = (pf.locked || 0);
 
         // --- Calculate Unrealized PnL (Mark-to-Market) ---
         const positions = await db.getStrategyOpenPositions(chatId, strat.id);
         let marketValue = 0;
-        
+
         // Fetch prices sequentially to avoid rate limits
         for (const pos of positions) {
             const currentPrice = await logic.fetchCurrentPrice(pos.condition_id, pos.outcome);
@@ -116,7 +116,7 @@ const getDashboardText = async (chatId) => {
                 marketValue += pos.bet_amount; // Fallback to cost
             }
         }
-        
+
         // If no positions but locked funds exist (rare sync issue), use locked
         if (positions.length === 0 && locked > 0) marketValue = locked;
 
@@ -125,7 +125,7 @@ const getDashboardText = async (chatId) => {
         const pnl = ((equity - startBalance) / startBalance) * 100;
         const pnlSign = pnl >= 0 ? '+' : '';
         const icon = pnl >= 0 ? '🟢' : '🔴';
-        
+
         const unrealizedPnl = marketValue - locked;
         const unrSign = unrealizedPnl >= 0 ? '+' : '';
 
@@ -135,7 +135,7 @@ const getDashboardText = async (chatId) => {
             report.push(`   📊 Unr: ${unrSign}$${unrealizedPnl.toFixed(2)}`);
         }
         report.push(`   💵 Bal: $${balance.toFixed(2)} | 🔒 Lock: $${locked.toFixed(2)}`);
-        
+
         totalEquity += equity;
         totalStart += startBalance;
     }
@@ -164,9 +164,9 @@ bot.onText(/\/reset/, async (msg) => {
     for (const strat of strategies) {
         await db.resetPortfolio(chatId, strat.id);
     }
-    await bot.sendMessage(chatId, "🔄 **All Portfolios Reset!**\nEach strategy restored to $100.00.", { 
+    await bot.sendMessage(chatId, "🔄 **All Portfolios Reset!**\nEach strategy restored to $100.00.", {
         parse_mode: 'Markdown',
-        reply_markup: ui.mainMenu 
+        reply_markup: ui.mainMenu
     });
 });
 
@@ -175,10 +175,10 @@ bot.onText(/\/status/, async (msg) => {
     const uptime = process.uptime();
     const uptimeHrs = Math.floor(uptime / 3600);
     const uptimeMins = Math.floor((uptime % 3600) / 60);
-    
+
     const memUsage = (process.memoryUsage().rss / 1024 / 1024).toFixed(2);
     const lastLoopSeconds = ((Date.now() - lastLoopTime) / 1000).toFixed(1);
-    
+
     const openPositions = await db.getAllOpenPositions();
     const activeUsers = await db.getAllActiveUsers();
 
@@ -204,7 +204,7 @@ bot.onText(/\/mining/, async (msg) => {
     const winrate = stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : "0.0";
     // Virtual PnL approximation (assuming $10 bets)
     // This is rough because we don't sum actual PnL in SQL yet, but avg_roi gives a hint
-    const virtualPnl = (stats.total * 10) * (stats.avg_roi / 100); 
+    const virtualPnl = (stats.total * 10) * (stats.avg_roi / 100);
     const sign = virtualPnl >= 0 ? '+' : '';
 
     const text = [
@@ -241,7 +241,7 @@ bot.on('callback_query', async (query) => {
     if (data === 'cmd_reset') {
         await db.resetPortfolio(chatId);
         await bot.answerCallbackQuery(query.id, { text: "Portfolio Reset to $100" });
-        
+
         const text = await getDashboardText(chatId);
         await bot.editMessageText(text, {
             chat_id: chatId,
@@ -272,13 +272,13 @@ async function runBotLoop() {
             // Sort trades by size (USD) descending. 
             // This ensures we process the biggest (smartest?) money first within the batch.
             trades.sort((a, b) => {
-                const sizeA = (Number(a.price||0) * Number(a.size||0));
-                const sizeB = (Number(b.price||0) * Number(b.size||0));
+                const sizeA = (Number(a.price || 0) * Number(a.size || 0));
+                const sizeB = (Number(b.price || 0) * Number(b.size || 0));
                 return sizeB - sizeA;
             });
-            logger.debug(`🔍 Scanned ${trades.length} trades. Top trade size: $${(Number(trades[0].price||0) * Number(trades[0].size||0)).toFixed(0)}`);
+            logger.debug(`🔍 Scanned ${trades.length} trades. Top trade size: $${(Number(trades[0].price || 0) * Number(trades[0].size || 0)).toFixed(0)}`);
         }
-        
+
         const activeUsers = await db.getAllActiveUsers();
         if (activeUsers.length === 0) return;
 
@@ -300,13 +300,13 @@ async function runBotLoop() {
             const sizeNum = Number(trade.size ?? 0);
             let tradeValueUsd = (isFinite(priceNum) ? priceNum : 0) * (isFinite(sizeNum) ? sizeNum : 0);
             if (!isFinite(tradeValueUsd) || tradeValueUsd < 0) tradeValueUsd = 0;
-            
+
             const walletAddress = trade.proxyWallet || trade.maker_address || trade.user;
             if (!walletAddress) continue;
 
             // Hard Filters
             const side = (String(trade.side || 'BUY')).toUpperCase();
-            
+
             // --- SELL LOGIC (Emergency Exit) ---
             if (side === 'SELL') {
                 // Optimization: Only check if we actually hold this asset
@@ -320,7 +320,7 @@ async function runBotLoop() {
                 // Fetch stats for the seller
                 // await new Promise(r => setTimeout(r, 250)); // REMOVED DELAY FOR SPEED
                 const sellerStats = await logic.fetchUserHistory(walletAddress, tradeValueUsd);
-                
+
                 // Iterate users to see who needs to sell
                 for (const user of validUsers) {
                     const positions = await db.getOpenPositions(user.chat_id, condId);
@@ -330,14 +330,14 @@ async function runBotLoop() {
                         // Criteria to Follow Sell:
                         // 1. Original Whale is dumping (The one we followed)
                         const isOriginalWhale = (position.whale_address && position.whale_address.toLowerCase() === walletAddress.toLowerCase());
-                        
+
                         // 2. Super Whale is dumping (Smart Money leaving)
                         // Relaxed criteria: Winrate > 60% (was 70%) OR PnL > $5000 (was $1000)
                         const isSuperWhale = (sellerStats.winrate > 60 && sellerStats.pnl > 5000);
 
                         if (isOriginalWhale || isSuperWhale) {
-                            logger.warn(`🚨 [SELL SIGNAL] Whale ${walletAddress.slice(0,6)} is selling. Closing position for User ${user.chat_id}`);
-                            
+                            logger.warn(`🚨 [SELL SIGNAL] Whale ${walletAddress.slice(0, 6)} is selling. Closing position for User ${user.chat_id}`);
+
                             // Execute Close
                             const success = await db.closePosition(position.id, priceNum);
                             if (success) {
@@ -351,20 +351,20 @@ async function runBotLoop() {
                                 // Proceeds = Shares * ExitPrice.
                                 const shares = position.size_usd / position.entry_price;
                                 const proceeds = shares * priceNum;
-                                
-                                await db.updatePortfolio(user.chat_id, position.strategy, { 
-                                    balanceDelta: proceeds, 
-                                    lockedDelta: -position.size_usd 
+
+                                await db.updatePortfolio(user.chat_id, position.strategy, {
+                                    balanceDelta: proceeds,
+                                    lockedDelta: -position.size_usd
                                 });
 
                                 const pnl = proceeds - position.size_usd;
                                 const sign = pnl >= 0 ? '+' : '';
-                                
-                                await bot.sendMessage(user.chat_id, 
+
+                                await bot.sendMessage(user.chat_id,
                                     `🚨 **EMERGENCY EXIT**\n` +
                                     `Whale sold position. We followed.\n` +
                                     `📉 Exit Price: ${priceNum}\n` +
-                                    `💰 PnL: ${sign}$${pnl.toFixed(2)}`, 
+                                    `💰 PnL: ${sign}$${pnl.toFixed(2)}`,
                                     { parse_mode: 'Markdown' }
                                 );
                             }
@@ -394,11 +394,11 @@ async function runBotLoop() {
             }
 
             logger.info(`🐳 Analyzing wallet: ${walletAddress}`);
-            
+
             // Fetch Whale Stats
             // No artificial delay needed - API is fast and we have caching
             const userData = await logic.fetchUserHistory(walletAddress, tradeValueUsd);
-            
+
             // Prepare View Data
             const whaleStats = userData || { winrateLowerBound: 0, medianPnl: 0, totalTrades: 0, pnl: 0, winrate: 0 };
             const walletLog = trade.wallet || walletAddress || "Unknown";
@@ -413,8 +413,19 @@ async function runBotLoop() {
             }
             // ------------------------------------------------------------------
 
+            // --- FILTER: SKIP NHL/NFL MARKETS (13% WR, -70% ROI - data proven losers) ---
+            const slugLower = (marketSlug || '').toLowerCase();
+            const titleLower = (trade.title || '').toLowerCase();
+            if (slugLower.includes('nhl-') || slugLower.includes('nfl-') ||
+                titleLower.includes(' nhl ') || titleLower.includes(' nfl ') ||
+                titleLower.includes('(nhl)') || titleLower.includes('(nfl)')) {
+                logger.debug(`[Filter] ❌ Skipping NHL/NFL market (13% WR): ${marketSlug}`);
+                continue;
+            }
+            // -----------------------------------------------------------------
+
             const cat = logic.categorizeMarket(trade.title, marketSlug);
-            
+
             // 1. Calculate Score (Context Aware)
             trade.whale_address = walletAddress; // Attach for portfolio manager
             const signalScore = portfolio.evaluateSignal(trade, whaleStats, cat);
@@ -430,7 +441,7 @@ async function runBotLoop() {
 
             // Prepare Signal Data
             const league = logic.extractLeague(trade.title, marketSlug);
-            
+
             // Resolve Outcome/Condition
             let outcomeCanonical = trade.outcome || '';
             let condIdForSave = trade.conditionId || trade.condition_id || '';
@@ -484,7 +495,7 @@ async function runBotLoop() {
                     size: Number(trade.size || 0),
                     tradeValueUsd,
                     wallet: walletAddress,
-                    timestamp: Number(trade.timestamp || Math.floor(Date.now()/1000))
+                    timestamp: Number(trade.timestamp || Math.floor(Date.now() / 1000))
                 };
                 const miningData = {
                     side: side,
@@ -513,7 +524,7 @@ async function runBotLoop() {
 
                     // Evaluate Strategy
                     const evalResult = strat.evaluate(trade, whaleStats);
-                    
+
                     if (evalResult.shouldBet) {
                         logger.info(`[${strat.name}] Matched! Score: ${evalResult.score}. Reason: ${evalResult.reason}`);
 
@@ -524,16 +535,16 @@ async function runBotLoop() {
 
                         if (viewData._signalId) {
                             // Handle Overrides (e.g. Inverse Strategy)
-                            const targetOutcome = (evalResult.override && evalResult.override.outcome) 
-                                ? evalResult.override.outcome 
+                            const targetOutcome = (evalResult.override && evalResult.override.outcome)
+                                ? evalResult.override.outcome
                                 : viewData._outcomeCanonical;
 
                             // --- PRE-FLIGHT PRICE CHECK ---
                             const signalPrice = Number(trade.price || 0);
                             let executionPrice = signalPrice;
-                            
+
                             const currentPrice = await logic.fetchCurrentPrice(condIdForSave, targetOutcome);
-                            
+
                             if (currentPrice !== null) {
                                 executionPrice = currentPrice;
                                 logger.debug(`✅ [Price Check] Target: ${targetOutcome}, Current: ${currentPrice}.`);
@@ -562,7 +573,7 @@ async function runBotLoop() {
                                     size: Number(trade.size || 0),
                                     tradeValueUsd,
                                     wallet: walletAddress,
-                                    timestamp: Number(trade.timestamp || Math.floor(Date.now()/1000))
+                                    timestamp: Number(trade.timestamp || Math.floor(Date.now() / 1000))
                                 }
                             };
 
@@ -570,33 +581,34 @@ async function runBotLoop() {
                             // Pass category to calculateBetSize inside executeAtomicBet (if needed) or calculate here
                             // Actually, bet size is calculated above: const bet = portfolio.calculateBetSize(pf.balance, evalResult.score);
                             // We need to update that call to include category.
-                            
+
                             // RE-CALCULATE BET SIZE WITH CATEGORY
                             const smartBet = portfolio.calculateBetSize(pf.balance, evalResult.score, cat);
-                            
+
                             if (smartBet > 0) {
                                 const success = await db.executeAtomicBet(user.chat_id, strat.id, viewData._signalId, smartBet, logData);
-                                
+
                                 if (success) {
                                     logger.success(`[${strat.name}] User ${user.chat_id} bet $${smartBet} on Signal ${viewData._signalId}`);
-                                    
+
                                     // Send Notification
                                     const caption = `🎰 **${strat.name} Action**\n\n` +
                                         `🐋 Whale: ${viewData.wallet_short}\n` +
                                         `📉 Score: ${evalResult.score}/100\n` +
                                         `💡 Reason: ${evalResult.reason}\n` +
-                                    `💵 Bet: $${smartBet.toFixed(2)}\n` +
-                                    `🎯 Event: ${viewData.market_question}\n` +
-                                    `🎲 Outcome: ${targetOutcome}`; // Show the outcome we actually bet on
-                                
-                                try {
-                                    await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
-                                } catch (e) {
-                                    if (e.response && e.response.statusCode === 400) {
-                                        // Chat not found or user blocked bot. Mark user inactive?
-                                        // logger.warn(`User ${user.chat_id} unreachable. Skipping.`);
-                                    } else {
-                                        logger.error(`Failed to send notification to ${user.chat_id}: ${e.message}`);
+                                        `💵 Bet: $${smartBet.toFixed(2)}\n` +
+                                        `🎯 Event: ${viewData.market_question}\n` +
+                                        `🎲 Outcome: ${targetOutcome}`; // Show the outcome we actually bet on
+
+                                    try {
+                                        await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
+                                    } catch (e) {
+                                        if (e.response && e.response.statusCode === 400) {
+                                            // Chat not found or user blocked bot. Mark user inactive?
+                                            // logger.warn(`User ${user.chat_id} unreachable. Skipping.`);
+                                        } else {
+                                            logger.error(`Failed to send notification to ${user.chat_id}: ${e.message}`);
+                                        }
                                     }
                                 }
                             }
@@ -605,7 +617,6 @@ async function runBotLoop() {
                 }
             }
         }
-    }
     } catch (err) {
         logger.error("Bot Loop Error:", err);
     } finally {
@@ -625,51 +636,51 @@ setInterval(async () => {
         const openPositions = await db.getAllOpenPositions();
         if (openPositions.length > 0) {
             logger.debug(`[Resolution] Checking ${openPositions.length} open positions...`);
-            
+
             for (const pos of openPositions) {
                 // Rate limit protection
                 await new Promise(r => setTimeout(r, 200));
-                
+
                 const status = await logic.fetchMarketStatus(pos.condition_id);
                 if (status && status.resolved) {
                     const didWin = (status.winnerOutcome === pos.outcome);
                     const exitPrice = didWin ? 1.0 : 0.0;
                     const pnlPercent = ((exitPrice - pos.entry_price) / pos.entry_price) * 100;
-                    
+
                     // Calculate Payout
                     // Shares = BetAmount / EntryPrice
                     // Payout = Shares * ExitPrice
                     const shares = pos.bet_amount / pos.entry_price;
                     const payout = shares * exitPrice;
-                    
+
                     // 1. Mark as Settled in DB
                     await db.markPositionSettled(pos.id, exitPrice, status.winnerOutcome);
-                    
+
                     // 2. Update Portfolio (Credit Payout)
                     // We only add the payout. The initial bet was already deducted.
                     if (payout > 0) {
-                        await db.updatePortfolio(pos.chat_id, pos.strategy, { 
-                            balanceDelta: payout, 
-                            lockedDelta: -pos.bet_amount 
+                        await db.updatePortfolio(pos.chat_id, pos.strategy, {
+                            balanceDelta: payout,
+                            lockedDelta: -pos.bet_amount
                         });
                     } else {
                         // Just unlock the funds (which are now gone)
-                        await db.updatePortfolio(pos.chat_id, pos.strategy, { 
-                            balanceDelta: 0, 
-                            lockedDelta: -pos.bet_amount 
+                        await db.updatePortfolio(pos.chat_id, pos.strategy, {
+                            balanceDelta: 0,
+                            lockedDelta: -pos.bet_amount
                         });
                     }
 
                     // 3. Notify User
                     const sign = pnlPercent >= 0 ? '+' : '';
-                    const msg = pnlPercent >= 0 
+                    const msg = pnlPercent >= 0
                         ? `🏁 **EVENT RESOLVED: WIN!**\nEvent: ${pos.market_slug}\nOutcome: ${pos.outcome}\nResult: ${sign}${pnlPercent.toFixed(0)}%\nPayout: $${payout.toFixed(2)}`
                         : `🏁 **EVENT RESOLVED: LOSS.**\nEvent: ${pos.market_slug}\nOutcome: ${pos.outcome}\nResult: -100%`;
-                    
+
                     try {
                         await bot.sendMessage(pos.chat_id, msg, { parse_mode: 'Markdown' });
-                    } catch (e) {}
-                    
+                    } catch (e) { }
+
                     logger.info(`[Resolution] Position ${pos.id} settled. PnL: ${pnlPercent.toFixed(0)}%`);
                 }
             }
@@ -680,16 +691,16 @@ setInterval(async () => {
         if (miningBets.length > 0) {
             // Process in batches to avoid spamming API
             // Only check 10 at a time per cycle to be safe
-            const batch = miningBets.slice(0, 10);
-            
+            const batch = miningBets.slice(0, 100);
+
             for (const bet of batch) {
                 await new Promise(r => setTimeout(r, 200));
                 const status = await logic.fetchMarketStatus(bet.condition_id);
-                
+
                 if (status && status.resolved) {
                     const didWin = (status.winnerOutcome === bet.outcome);
                     const exitPrice = didWin ? 1.0 : 0.0;
-                    
+
                     // Just mark as settled. No portfolio update, no notification.
                     await db.markMiningBetSettled(bet.id, exitPrice, status.winnerOutcome);
                     logger.debug(`[Mining] ⛏️ Shadow Bet ${bet.id} resolved. Result: ${didWin ? 'WIN' : 'LOSS'}`);
@@ -709,10 +720,10 @@ setInterval(async () => {
         for (const it of items) {
             const roi = Number(it.result_pnl_percent || 0);
             const sign = roi > 0 ? '+' : '';
-            const msg = roi > 0 
+            const msg = roi > 0
                 ? `✅ **WIN!**\nResult: ${sign}${roi.toFixed(0)}%`
                 : `❌ **LOSS.**\nResult: ${roi.toFixed(0)}%`;
-            
+
             try {
                 await bot.sendMessage(it.chat_id, msg, { parse_mode: 'Markdown' });
                 await db.markUserSignalLogNotified(it.id);
@@ -732,12 +743,12 @@ setInterval(async () => {
     try {
         const activeUsers = await db.getAllActiveUsers();
         if (activeUsers.length === 0) return;
-        
+
         const msg = "💓 **System Heartbeat**\nBot is active and scanning for whales.";
         for (const user of activeUsers) {
             try {
                 await bot.sendMessage(user.chat_id, msg, { parse_mode: 'Markdown' });
-            } catch (e) {}
+            } catch (e) { }
         }
         logger.info("Sent hourly heartbeat.");
     } catch (e) {
