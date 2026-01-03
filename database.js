@@ -746,6 +746,7 @@ const hasOpenPosition = (chatId, strategyId, conditionId) => {
     });
 };
 
+
 module.exports = {
     initDb,
     getUser,
@@ -779,6 +780,7 @@ module.exports = {
     updateBalance,
     updatePortfolio,
     hasOpenPosition,
+    anyUserHasPosition,
     /**
      * Executes a bet atomically: Deducts balance AND logs the signal in one transaction.
      * @param {number} userId 
@@ -872,8 +874,8 @@ module.exports = {
                     systemMiningId,
                     signalId,
                     tradeData.side,
-                    tradeData.entry_price,
-                    tradeData.size_usd,
+                    tradeData.entry_price, // Using existing entry_price from tradeData
+                    tradeData.size_usd,    // Using existing size_usd from tradeData
                     virtualBet,
                     tradeData.category,
                     tradeData.league,

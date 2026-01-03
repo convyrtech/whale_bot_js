@@ -40,10 +40,20 @@ module.exports = {
         }
 
         // 2. FUNDAMENTAL ANALYSIS (Quant Style)
-        // A. Wallet Age (From Goldsky/Polymarket Data)
-        // If we have stats, we check the account age.
-        // Data comes from 'whale_logic.js' GraphQL query.
         const stats = whaleStats.global || whaleStats;
+        const tradesCount = stats.totalTrades || 0;
+        const winrate = stats.winrate || 0;
+        const pnl = stats.pnl || 0;
+
+        // Pattern A: The "Ghost Insider" (New or Loser account drops huge sum on Longshot)
+        if (sizeUsd >= 2000 && price < 0.20) {
+            if (tradesCount < 10 || winrate === 0) {
+                score += 60; // Huge bonus for anomalous outlier move
+                reasons.push(`Ghost Insider Pattern (Empty Wallet Outlier)`);
+            }
+        }
+
+        // Pattern B: Wallet Age
         if (stats && stats.firstTradeTimestamp) {
             const ageDays = (Date.now() - stats.firstTradeTimestamp) / (1000 * 60 * 60 * 24);
 
@@ -65,19 +75,22 @@ module.exports = {
         // Only run if we have a strong base signal to avoid API spam
         if (score > 40) {
             try {
-                // Legacy Web3 Check (Fallback if Goldsky fails or for Balance)
-                const ageMs = await web3.getWalletAgeMs(trade.maker_address);
+                const walletAddr = trade.maker_address || trade.whale_address || trade.user;
+                if (walletAddr) {
+                    // Legacy Web3 Check (Fallback if Goldsky fails or for Balance)
+                    const ageMs = await web3.getWalletAgeMs(walletAddr);
 
-                // B. Balance Check (Smart Money vs Degen)
-                const balanceUsd = await web3.getUsdcBalance(trade.maker_address);
-                if (balanceUsd > 0) {
-                    const ratio = sizeUsd / balanceUsd;
-                    if (ratio > 0.8) {
-                        score -= 20; // All-in = Gambler
-                        reasons.push(`All-in Degen (Bet >80% Balance)`);
-                    } else if (ratio < 0.1) {
-                        score += 20; // Smart Money (<10% of portfolio)
-                        reasons.push(`Smart Money Size (<10% Balance)`);
+                    // B. Balance Check (Smart Money vs Degen)
+                    const balanceUsd = await web3.getUsdcBalance(walletAddr);
+                    if (balanceUsd > 0) {
+                        const ratio = sizeUsd / balanceUsd;
+                        if (ratio > 0.8) {
+                            score -= 20; // All-in = Gambler
+                            reasons.push(`All-in Degen (Bet >80% Balance)`);
+                        } else if (ratio < 0.1) {
+                            score += 20; // Smart Money (<10% of portfolio)
+                            reasons.push(`Smart Money Size (<10% Balance)`);
+                        }
                     }
                 }
             } catch (e) {

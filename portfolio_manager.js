@@ -92,7 +92,7 @@ function evaluateSignal(signal, whaleStats, category = 'global') {
     // 0.2 PROBABILITY BANDS (The "Barbell" Safety Valve)
     // Data Audit showed that 40-70% odds is a "Death Zone" (-12% ROI).
     // We only trade "Longshots" (< 40%) or "Safe Bets" (> 70%).
-    const entryPrice = Number(signal.entry_price || 0);
+    const entryPrice = Number(signal.entry_price || signal.price || 0);
     if (entryPrice > 0.40 && entryPrice < 0.70) {
         logger.debug(`🚫 TOXIC ZONE: Skipping trade at ${(entryPrice * 100).toFixed(0)}% odds.`);
         return 0;
@@ -152,12 +152,25 @@ function evaluateSignal(signal, whaleStats, category = 'global') {
         totalScore -= 20;
     }
 
-    // 7. Tilt Breaker (Streak Check)
-    // If whale is on a losing streak (<= -3), apply massive penalty
+    // 7. Tilt Breaker / Loser Penalty
     const streak = stats.streak || 0;
-    if (streak <= -3) {
+    const pnl = stats.pnl || 0;
+
+    // ANOMALY DETECTION: Huge bet on a longshot by an "empty" or "loser" account
+    // This is the "Ghost Insider" pattern we missed on Venezuela.
+    const sizeUsd = Number(signal.size_usd || signal.tradeValueUsd || 0);
+    const isAnomalousMove = (sizeUsd >= 1000 && price < 0.15);
+
+    if (streak <= -3 && !isAnomalousMove) {
         logger.warn(`[Tilt Breaker] Whale ${context} streak is ${streak}. Applying -50 penalty.`);
         totalScore -= 50;
+    } else if (pnl < 0 && !isAnomalousMove) {
+        totalScore -= 20; // General loser penalty
+    }
+
+    if (isAnomalousMove) {
+        logger.info(`🚨 [Anomaly] Detected Potential Insider Move ($${sizeUsd.toFixed(0)} @ ${price.toFixed(2)}). Bypassing penalties.`);
+        totalScore = Math.max(totalScore, 65); // Give it a base "Insider" score
     }
 
     // 8. Category Multiplier
@@ -243,13 +256,23 @@ function calculateBetSize(balance, score, category = 'other', price = 0.50, hour
     // 5. Hard Caps
     if (targetPct > 0.15) targetPct = 0.15; // Max 15% per trade
 
+    // 5. Final Constraints
+    const MAX_BANKROLL_PCT = 0.05; // 5% Absolute Max to prevent ruin
+    if (targetPct > MAX_BANKROLL_PCT) {
+        logger.debug(`[Portfolio] Capping Kelly Target ${(targetPct * 100).toFixed(1)}% -> ${(MAX_BANKROLL_PCT * 100).toFixed(1)}%`);
+        targetPct = MAX_BANKROLL_PCT;
+    }
+
     let bet = balance * targetPct;
     if (bet > 5000) bet = 5000; // Max $5,000 liquidity cap
 
-    if (bet < 10) bet = (balance >= 10) ? 10 : 0;
+    // Minimum bet safeguard
+    if (bet < 1) return 0;
+
+    // Ensure bet doesn't exceed available balance
     if (bet > balance) bet = balance;
 
-    const finalBet = Math.floor(bet * 100) / 100;
+    const finalBet = Math.round(bet * 100) / 100;
     const boostMsg = (hoursRem < 6) ? ` ⚡ FLASH BOOST (${hoursRem.toFixed(1)}h)` : '';
     logger.info(`[Kelly Money Manager]${boostMsg} Price: ${price.toFixed(2)} | Edge: ${((p_estimated - price) * 100).toFixed(1)}% | Kelly: ${(kellyPct * 100).toFixed(1)}% -> Safe: ${(targetPct * 100).toFixed(1)}% | Bet: $${finalBet}`);
     return finalBet;

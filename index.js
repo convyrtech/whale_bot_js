@@ -367,7 +367,11 @@ async function runBotLoop() {
             const priceNum = Number(trade.price ?? 0);
             const sizeNum = Number(trade.size ?? 0);
             let tradeValueUsd = (isFinite(priceNum) ? priceNum : 0) * (isFinite(sizeNum) ? sizeNum : 0);
-            if (!isFinite(tradeValueUsd) || tradeValueUsd < 0) tradeValueUsd = 0;
+
+            if (!isFinite(tradeValueUsd) || tradeValueUsd <= 0) {
+                // Ignore zero value trades (often spam or failed txs)
+                continue;
+            }
 
             const walletAddress = trade.proxyWallet || trade.maker_address || trade.user;
             if (!walletAddress) continue;
@@ -579,127 +583,144 @@ async function runBotLoop() {
             }
 
             // --- TRACK B: MULTI-STRATEGY EXECUTION ---
-            for (const user of validUsers) {
+            if (signalScore === 0) {
+                logger.debug(`[Bot] Skip Execution: Signal failed global filters (Score: 0)`);
+            } else {
+                // 1. Pre-evaluate all strategies once for this signal
+                const activeStrategies = [];
                 for (const strat of strategies) {
-                    let pf = await db.getPortfolio(user.chat_id, strat.id);
-                    if (!pf) { await db.initPortfolio(user.chat_id, strat.id); pf = await db.getPortfolio(user.chat_id, strat.id); }
-
-                    if (!pf.is_challenge_active) continue;
-
-                    // Check for open position in this strategy
-                    const hasOpen = await db.hasOpenPosition(user.chat_id, strat.id, condIdForSave);
-                    if (hasOpen) continue;
-
-                    // Evaluate Strategy
-                    const evalResult = strat.evaluate(trade, whaleStats);
-
+                    const evalResult = await strat.evaluate(trade, whaleStats);
                     if (evalResult.shouldBet) {
-                        logger.info(`[${strat.name}] Matched! Score: ${evalResult.score}. Reason: ${evalResult.reason}`);
+                        activeStrategies.push({ strat, evalResult });
+                    }
+                }
 
-                        // Calculate Bet
-                        const balance = Number(pf.balance || 0);
-                        // Use strategy score for sizing (OLD CALL - REMOVED)
-                        // const bet = portfolio.calculateBetSize(balance, evalResult.score);
+                if (activeStrategies.length > 0) {
+                    // 2. Check global exposure once for this market
+                    const isAlreadyExposed = await db.anyUserHasPosition(condIdForSave);
 
-                        if (viewData._signalId) {
-                            // Handle Overrides (e.g. Inverse Strategy)
-                            const targetOutcome = (evalResult.override && evalResult.override.outcome)
-                                ? evalResult.override.outcome
-                                : viewData._outcomeCanonical;
+                    for (const user of validUsers) {
+                        for (const { strat, evalResult } of activeStrategies) {
+                            if (isAlreadyExposed) {
+                                logger.debug(`[Bot] Global Exposure Limit: Skipping ${strat.name} (already in market)`);
+                                continue;
+                            }
 
-                            // --- DURATION CHECK (Capital Efficiency) ---
-                            // Skip trades that lock funds for too long (> 24 hours)
-                            // User request: "сделать что бы он не брал долгие сделки"
-                            const MAX_DURATION_HOURS = 24; // 24 Hours Max
-                            const marketDetails = await logic.fetchMarketDetails(condIdForSave);
+                            let pf = await db.getPortfolio(user.chat_id, strat.id);
+                            if (!pf) { await db.initPortfolio(user.chat_id, strat.id); pf = await db.getPortfolio(user.chat_id, strat.id); }
+                            if (!pf.is_challenge_active) continue;
 
-                            if (marketDetails && marketDetails.end_date_iso) {
-                                const endDate = new Date(marketDetails.end_date_iso);
-                                const now = new Date();
-                                const hoursUntilEnd = (endDate - now) / (1000 * 60 * 60);
+                            // Check for open position in this strategy
+                            const hasOpen = await db.hasOpenPosition(user.chat_id, strat.id, condIdForSave);
+                            if (hasOpen) continue;
 
-                                if (hoursUntilEnd > MAX_DURATION_HOURS) {
-                                    logger.warn(`⏳ [Duration Filter] Skipping ${viewData.market_question} (Expires in ${hoursUntilEnd.toFixed(1)}h > ${MAX_DURATION_HOURS}h)`);
-                                    processedTrades.add(tradeId); // Mark as filtered to avoid re-checking
-                                    continue;
+                            logger.info(`[${strat.name}] Matched! Score: ${evalResult.score}. Reason: ${evalResult.reason}`);
+
+                            // Calculate Bet
+                            const balance = Number(pf.balance || 0);
+                            // Use strategy score for sizing (OLD CALL - REMOVED)
+                            // const bet = portfolio.calculateBetSize(balance, evalResult.score);
+
+                            if (viewData._signalId) {
+                                // Handle Overrides (e.g. Inverse Strategy)
+                                const targetOutcome = (evalResult.override && evalResult.override.outcome)
+                                    ? evalResult.override.outcome
+                                    : viewData._outcomeCanonical;
+
+                                // --- DURATION CHECK (Capital Efficiency) ---
+                                // Skip trades that lock funds for too long (> 24 hours)
+                                // User request: "сделать что бы он не брал долгие сделки"
+                                const MAX_DURATION_HOURS = 24; // 24 Hours Max
+                                const marketDetails = await logic.fetchMarketDetails(condIdForSave);
+
+                                if (marketDetails && marketDetails.end_date_iso) {
+                                    const endDate = new Date(marketDetails.end_date_iso);
+                                    const now = new Date();
+                                    const hoursUntilEnd = (endDate - now) / (1000 * 60 * 60);
+
+                                    if (hoursUntilEnd > MAX_DURATION_HOURS) {
+                                        logger.warn(`⏳ [Duration Filter] Skipping ${viewData.market_question} (Expires in ${hoursUntilEnd.toFixed(1)}h > ${MAX_DURATION_HOURS}h)`);
+                                        processedTrades.add(tradeId); // Mark as filtered to avoid re-checking
+                                        continue;
+                                    }
                                 }
-                            }
-                            // -------------------------------------------
+                                // -------------------------------------------
 
-                            // --- PRE-FLIGHT PRICE CHECK ---
-                            const signalPrice = Number(trade.price || 0);
-                            let executionPrice = signalPrice;
+                                // --- PRE-FLIGHT PRICE CHECK ---
+                                const signalPrice = Number(trade.price || 0);
+                                let executionPrice = signalPrice;
 
-                            const currentPrice = await logic.fetchCurrentPrice(condIdForSave, targetOutcome);
+                                const currentPrice = await logic.fetchCurrentPrice(condIdForSave, targetOutcome);
 
-                            if (currentPrice !== null) {
-                                executionPrice = currentPrice;
-                                logger.debug(`✅ [Price Check] Target: ${targetOutcome}, Current: ${currentPrice}.`);
-                            } else if (targetOutcome !== viewData._outcomeCanonical) {
-                                // Fallback for Inverse if API fails: Estimate as 1 - signalPrice
-                                executionPrice = 1.0 - signalPrice;
-                                if (executionPrice < 0) executionPrice = 0;
-                                if (executionPrice > 1) executionPrice = 1;
-                            }
-
-                            const logData = {
-                                strategy: strat.id, // Log the specific strategy ID
-                                side: side,
-                                entry_price: executionPrice, // Use the ACTUAL price of the asset we are buying
-                                size_usd: tradeValueUsd,
-                                category: viewData._category,
-                                league: viewData._league,
-                                outcome: targetOutcome, // Use the target outcome
-                                token_index: viewData._tokenIndex,
-                                analysis_meta: {
-                                    category: cat,
-                                    score: evalResult.score,
-                                    whaleStats,
-                                    reason: evalResult.reason,
-                                    price: Number(trade.price || 0),
-                                    size: Number(trade.size || 0),
-                                    tradeValueUsd,
-                                    wallet: walletAddress,
-                                    timestamp: Number(trade.timestamp || Math.floor(Date.now() / 1000))
+                                if (currentPrice !== null) {
+                                    executionPrice = currentPrice;
+                                    logger.debug(`✅ [Price Check] Target: ${targetOutcome}, Current: ${currentPrice}.`);
+                                } else if (targetOutcome !== viewData._outcomeCanonical) {
+                                    // Fallback for Inverse if API fails: Estimate as 1 - signalPrice
+                                    executionPrice = 1.0 - signalPrice;
+                                    if (executionPrice < 0) executionPrice = 0;
+                                    if (executionPrice > 1) executionPrice = 1;
                                 }
-                            };
 
-                            // ATOMIC EXECUTION
-                            // Pass category to calculateBetSize inside executeAtomicBet (if needed) or calculate here
-                            // Actually, bet size is calculated above: const bet = portfolio.calculateBetSize(pf.balance, evalResult.score);
-                            // We need to update that call to include category.
+                                const logData = {
+                                    strategy: strat.id, // Log the specific strategy ID
+                                    side: side,
+                                    entry_price: executionPrice, // Use the ACTUAL price of the asset we are buying
+                                    size_usd: tradeValueUsd,
+                                    category: viewData._category,
+                                    league: viewData._league,
+                                    outcome: targetOutcome, // Use the target outcome
+                                    token_index: viewData._tokenIndex,
+                                    analysis_meta: {
+                                        category: cat,
+                                        score: evalResult.score,
+                                        whaleStats,
+                                        reason: evalResult.reason,
+                                        price: Number(trade.price || 0),
+                                        size: Number(trade.size || 0),
+                                        tradeValueUsd,
+                                        wallet: walletAddress,
+                                        timestamp: Number(trade.timestamp || Math.floor(Date.now() / 1000))
+                                    }
+                                };
 
-                            // RE-CALCULATE BET SIZE WITH KELLY CRITERION & FLASH BOOST
-                            let hRem = 999;
-                            if (marketDetails && marketDetails.end_date_iso) {
-                                const endDate = new Date(marketDetails.end_date_iso);
-                                hRem = (endDate - new Date()) / (1000 * 60 * 60);
-                            }
-                            const smartBet = portfolio.calculateBetSize(pf.balance, evalResult.score, cat, executionPrice, hRem);
+                                // ATOMIC EXECUTION
+                                // Pass category to calculateBetSize inside executeAtomicBet (if needed) or calculate here
+                                // Actually, bet size is calculated above: const bet = portfolio.calculateBetSize(pf.balance, evalResult.score);
+                                // We need to update that call to include category.
 
-                            if (smartBet > 0) {
-                                const success = await db.executeAtomicBet(user.chat_id, strat.id, viewData._signalId, smartBet, logData);
+                                // RE-CALCULATE BET SIZE WITH KELLY CRITERION & FLASH BOOST
+                                let hRem = 999;
+                                if (marketDetails && marketDetails.end_date_iso) {
+                                    const endDate = new Date(marketDetails.end_date_iso);
+                                    hRem = (endDate - new Date()) / (1000 * 60 * 60);
+                                }
+                                const smartBet = portfolio.calculateBetSize(pf.balance, evalResult.score, cat, executionPrice, hRem);
 
-                                if (success) {
-                                    logger.success(`[${strat.name}] User ${user.chat_id} bet $${smartBet} on Signal ${viewData._signalId}`);
+                                if (smartBet > 0) {
+                                    const success = await db.executeAtomicBet(user.chat_id, strat.id, viewData._signalId, smartBet, logData);
 
-                                    // Send Notification
-                                    const caption = `🎰 **${strat.name} Action**\n\n` +
-                                        `🐋 Whale: ${viewData.wallet_short}\n` +
-                                        `📉 Score: ${evalResult.score}/100\n` +
-                                        `💡 Reason: ${evalResult.reason}\n` +
-                                        `💵 Bet: $${smartBet.toFixed(2)}\n` +
-                                        `🎯 Event: ${viewData.market_question}\n` +
-                                        `🎲 Outcome: ${targetOutcome}`; // Show the outcome we actually bet on
+                                    if (success) {
+                                        logger.success(`[${strat.name}] User ${user.chat_id} bet $${smartBet} on Signal ${viewData._signalId}`);
 
-                                    try {
-                                        await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
-                                    } catch (e) {
-                                        if (e.response && e.response.statusCode === 400) {
-                                            // Chat not found or user blocked bot. Mark user inactive?
-                                            // logger.warn(`User ${user.chat_id} unreachable. Skipping.`);
-                                        } else {
-                                            logger.error(`Failed to send notification to ${user.chat_id}: ${e.message}`);
+                                        // Send Notification
+                                        const caption = `🎰 **${strat.name} Action**\n\n` +
+                                            `🐋 Whale: ${viewData.wallet_short}\n` +
+                                            `📉 Score: ${evalResult.score}/100\n` +
+                                            `💡 Reason: ${evalResult.reason}\n` +
+                                            `💵 Bet: $${smartBet.toFixed(2)}\n` +
+                                            `🎯 Event: ${viewData.market_question}\n` +
+                                            `🎲 Outcome: ${targetOutcome}`; // Show the outcome we actually bet on
+
+                                        try {
+                                            await bot.sendMessage(user.chat_id, caption, { parse_mode: 'Markdown' });
+                                        } catch (e) {
+                                            if (e.response && e.response.statusCode === 400) {
+                                                // Chat not found or user blocked bot. Mark user inactive?
+                                                // logger.warn(`User ${user.chat_id} unreachable. Skipping.`);
+                                            } else {
+                                                logger.error(`Failed to send notification to ${user.chat_id}: ${e.message}`);
+                                            }
                                         }
                                     }
                                 }
