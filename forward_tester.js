@@ -31,10 +31,10 @@ function computeRoi(side, payout, entry, sizeUsd) {
     // Default: realistic mode (actual Polymarket conditions)
     // Override: ROI_MODE=conservative for stress-testing
     const mode = (process.env.ROI_MODE || 'realistic').toLowerCase();
-    const calculateFn = mode === 'conservative' 
-        ? math.calculateConservativeRoi 
+    const calculateFn = mode === 'conservative'
+        ? math.calculateConservativeRoi
         : math.calculateRealisticRoi;
-    
+
     const s = (side || 'BUY').toUpperCase();
     if (s === 'BUY') {
         return calculateFn(payout, entry, sizeUsd);
@@ -67,7 +67,7 @@ async function backfillConditionIdIfNeeded(signal) {
                 return true;
             }
         }
-    } catch (_) {}
+    } catch (_) { }
     return false;
 }
 
@@ -110,14 +110,14 @@ async function checkResolutions() {
                 const winnerOutcome = (winnerIndex >= 0 && tokens[winnerIndex]) ? tokens[winnerIndex].outcome : (tokens.find(t => t.winner)?.outcome || null);
 
                 if (!market.closed) continue;
-                
+
                 // VOID/REFUND HANDLING: Full stake return, ROI=0%
                 const marketStatus = String(market.status || '').toLowerCase();
                 const isVoid = marketStatus === 'voided' || marketStatus === 'refunded' || marketStatus === 'invalid';
                 if (isVoid) {
                     if (process.env.FORWARD_DEBUG === '1') console.log(`   ♻️ Signal ${signal.id}: Market VOIDED/REFUNDED. Returning stakes...`);
                     await db.updateSignalResult(signal.id, { status: 'CLOSED_VOID', result_pnl_percent: 0, resolved_outcome: 'VOID' });
-                    
+
                     // Update user logs and return bets
                     const userLogs = await db.getUserLogsBySignalId(signal.id);
                     for (const row of userLogs) {
@@ -126,19 +126,21 @@ async function checkResolutions() {
                             const betAmt = Number(row.bet_amount || 0);
                             if (betAmt > 0) {
                                 // Return full stake: release locked, add to balance
-                                await db.updatePortfolio(row.chat_id, { balanceDelta: betAmt, lockedDelta: -betAmt });
+                                await db.updatePortfolio(row.chat_id, row.strategy, { balanceDelta: betAmt, lockedDelta: -betAmt });
                             }
-                        } catch (_) {}
+                        } catch (e) {
+                            if (process.env.FORWARD_DEBUG === '1') console.error(`   ❌ Error returning void bet ${row.id}:`, e);
+                        }
                     }
                     if (process.env.FORWARD_DEBUG === '1') console.log(`   ✅ Signal ${signal.id}: Void settled.`);
                     continue;
                 }
-                
+
                 if (process.env.FORWARD_DEBUG === '1') console.log(`   🏁 Signal ${signal.id}: Market CLOSED. Resolving...`);
 
                 // Determine which token the signal references (supports multi-outcome markets)
                 let signalTokenIndex = typeof signal.token_index === 'number' ? signal.token_index : findTokenIndex(tokens, signal.outcome || '');
-                
+
                 if (process.env.FORWARD_DEBUG === '1') {
                     const availableOutcomes = tokens.map((t, i) => `[${i}] ${t.outcome}${t.winner ? ' ✓' : ''}`).join(', ');
                     console.log(`   📊 Signal ${signal.id}: Outcome="${signal.outcome}" → Token[${signalTokenIndex}], Available: ${availableOutcomes}`);
@@ -192,24 +194,29 @@ async function checkResolutions() {
 
                         // --- SEPARATION LOGIC ---
                         const betAmt = Number(row.bet_amount || 0);
-                        
+
                         if (row.strategy === 'shadow_mining') {
                             // TRACK A: Data Mining
                             // Do NOTHING to portfolio. Just saved the ROI above.
                             if (process.env.FORWARD_DEBUG === '1') console.log(`   ⛏️ Shadow Bet ${row.id} resolved. ROI: ${userRoi.toFixed(2)}%`);
-                        } 
+                        }
                         else if (betAmt > 0) {
                             // TRACK B: Real Challenge / Portfolio
                             // Calculate Payout and Update Balance
                             const payoutFactor = Math.max(0, 1 + (userRoi / 100));
                             const payoutUsd = Math.round(betAmt * payoutFactor * 100) / 100;
-                            
+
                             // Release locked and credit balance
-                            await db.updatePortfolio(row.chat_id, { balanceDelta: payoutUsd, lockedDelta: -betAmt });
-                            
-                            if (process.env.FORWARD_DEBUG === '1') console.log(`   💰 Real Bet ${row.id} resolved. Payout: $${payoutUsd}`);
+                            if (row.strategy) {
+                                await db.updatePortfolio(row.chat_id, row.strategy, { balanceDelta: payoutUsd, lockedDelta: -betAmt });
+                                if (process.env.FORWARD_DEBUG === '1') console.log(`   💰 Real Bet ${row.id} resolved. Payout: $${payoutUsd}`);
+                            } else {
+                                if (process.env.FORWARD_DEBUG === '1') console.error(`   ⚠️ Missing strategy for log ${row.id}, cannot update portfolio.`);
+                            }
                         }
-                    } catch (_) {}
+                    } catch (e) {
+                        if (process.env.FORWARD_DEBUG === '1') console.error(`   ❌ Error processing log ${row.id}:`, e);
+                    }
                 }
 
                 if (process.env.FORWARD_DEBUG === '1') console.log(`   ✅ Signal ${signal.id}: Resolved.`);
@@ -233,7 +240,7 @@ module.exports = {
     checkResolutions,
     setFetch,
     setRateSleep,
-    backfillMissingConditionIds: async function() {
+    backfillMissingConditionIds: async function () {
         try {
             const pendingSignals = await db.getPendingSignals();
             const targets = pendingSignals.filter(s => !s.condition_id);
@@ -241,8 +248,8 @@ module.exports = {
                 await new Promise(r => setTimeout(r, rateSleepMs));
                 try {
                     await backfillConditionIdIfNeeded(signal);
-                } catch (_) {}
+                } catch (_) { }
             }
-        } catch (_) {}
+        } catch (_) { }
     }
 };

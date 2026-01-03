@@ -1,10 +1,47 @@
-node_modules/
+# Credentials & Secrets
 .env
+*.key
+*.json
+!whale_tracker_V28_MANUAL_SQL.json # Keep workflow template
+!volatility_scanner.json
+
+# Databases & Data
 *.db
-*.db-shm
+*.db-journal
 *.db-wal
-*.sqlite
+*.csv
+/data
+/backups
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# System & IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
 logs/
-data/
-archive/
-vpn_service/
+*.log
+npm-debug.log*
+
+# Misc
+temp_*.js
+test_*.js
+audit_*.js
+migrate_*.js
+boost_balance.js
+reset_balance.js
+reset_balance_internal.js
+CORTEX_*
+RECOVERY_*
+*.md
+!README.md
+!walkthrough.md
+!strategic_roadmap.md
+!task.md
+!implementation_plan.md
+!logic_upgrade_plan.md

@@ -18,7 +18,8 @@ const path = require('path');
 // Strategies
 const strategies = [
     require('./strategies/sniper'),
-    require('./strategies/inverse'),
+    require('./strategies/insider'), // New "Big Short / Insider" Logic
+    // require('./strategies/test'),  // Test strategy (disabled)
     require('./strategies/trend_surfer')
 ];
 
@@ -121,7 +122,7 @@ const getDashboardText = async (chatId) => {
         if (positions.length === 0 && locked > 0) marketValue = locked;
 
         const equity = balance + marketValue;
-        const startBalance = 100.00;
+        const startBalance = 100000.00; // Updated for Data Mining Mode
         const pnl = ((equity - startBalance) / startBalance) * 100;
         const pnlSign = pnl >= 0 ? '+' : '';
         const icon = pnl >= 0 ? '🟢' : '🔴';
@@ -255,12 +256,26 @@ bot.on('callback_query', async (query) => {
         await bot.answerCallbackQuery(query.id, { text: "Loading stats..." });
 
         try {
-            const stratStats = await db.getStrategyStats(7);
-            const catStats = await db.getCategoryLeagueStats(7);
+            // 1. Fetch 30-Day Stats (covers typical open/close cycle)
+            const stratStats = await db.getStrategyStats(30);
+            const catStats = await db.getCategoryLeagueStats(30);
+            const oddsStats = await db.getOddsBucketStats(30);
+            const durationStats = await db.getDurationBucketStats(30); // New: Speed Profile
+            const portfolios = await db.getUserPortfolios(chatId);
 
-            let lines = ["📊 **Strategy Performance (7 days)**\n"];
+            let lines = ["💰 **Portfolio Health**"];
+
+            // Show Portfolio Balances
+            for (const pf of portfolios) {
+                if (!pf.is_challenge_active) continue;
+                const total = (pf.balance + pf.locked).toFixed(2);
+                lines.push(`💼 **${pf.strategy_id}**: $${total} (Free: $${pf.balance.toFixed(2)} | 🔒 Locked: $${pf.locked.toFixed(2)})`);
+            }
+
+            lines.push("\n📊 **Strategy Performance (Last 30 days)**");
 
             // Strategy stats
+            if (stratStats.length === 0) lines.push("_No closed trades yet._");
             for (const s of stratStats) {
                 if (s.strategy === 'shadow_mining') continue;
                 const wr = s.total > 0 ? ((s.wins / s.total) * 100).toFixed(0) : 0;
@@ -270,19 +285,33 @@ bot.on('callback_query', async (query) => {
                 lines.push(`   ${s.total} trades | ${wr}% WR | ${roiSign}${s.avg_roi_capped.toFixed(0)}% ROI`);
             }
 
-            lines.push("\n📈 **Category Performance (7 days)**\n");
+            lines.push("\n🎲 **Risk Profile (Where is the Alpha?)**");
+            for (const o of oddsStats) {
+                const wr = o.total > 0 ? ((o.wins / o.total) * 100).toFixed(0) : 0;
+                const roiSign = o.avg_roi_capped >= 0 ? '+' : '';
+                lines.push(`• **${o.bucket}**: ${o.total} bets | ${wr}% WR | ${roiSign}${o.avg_roi_capped.toFixed(0)}% ROI`);
+            }
 
-            // Top 8 categories by volume
-            const topCats = catStats.slice(0, 8);
+            lines.push("\n🏎️ **Speed Profile (Capital Velocity)**");
+            for (const d of durationStats) {
+                const wr = d.total > 0 ? ((d.wins / d.total) * 100).toFixed(0) : 0;
+                const roiSign = d.avg_roi_capped >= 0 ? '+' : '';
+                lines.push(`• **${d.bucket}**: ${d.total} trades | ${wr}% WR | ${roiSign}${d.avg_roi_capped.toFixed(0)}% ROI`);
+            }
+
+            lines.push("\n📈 **Top Categories (30 days)**");
+
+            // Top 5 categories
+            const topCats = catStats.slice(0, 5);
             for (const c of topCats) {
                 const wr = c.total > 0 ? ((c.wins / c.total) * 100).toFixed(0) : 0;
                 const roiSign = c.avg_roi_capped >= 0 ? '+' : '';
                 const icon = Number(wr) >= 50 ? '✅' : '❌';
-                const league = c.league ? ` (${c.league})` : '';
-                lines.push(`${icon} ${c.category}${league}: ${c.total} | ${wr}% | ${roiSign}${c.avg_roi_capped.toFixed(0)}%`);
+                // const league = c.league ? ` (${c.league})` : '';
+                lines.push(`${icon} ${c.category}: ${c.total} trades | ${roiSign}${c.avg_roi_capped.toFixed(0)}% ROI`);
             }
 
-            lines.push("\n_WR = Winrate, ROI = Return on Investment_");
+            lines.push("\n_Note: Stats cover 30 days. Locked funds are in Open positions._");
 
             await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
         } catch (e) {
@@ -578,6 +607,25 @@ async function runBotLoop() {
                                 ? evalResult.override.outcome
                                 : viewData._outcomeCanonical;
 
+                            // --- DURATION CHECK (Capital Efficiency) ---
+                            // Skip trades that lock funds for too long (> 24 hours)
+                            // User request: "сделать что бы он не брал долгие сделки"
+                            const MAX_DURATION_HOURS = 24; // 24 Hours Max
+                            const marketDetails = await logic.fetchMarketDetails(condIdForSave);
+
+                            if (marketDetails && marketDetails.end_date_iso) {
+                                const endDate = new Date(marketDetails.end_date_iso);
+                                const now = new Date();
+                                const hoursUntilEnd = (endDate - now) / (1000 * 60 * 60);
+
+                                if (hoursUntilEnd > MAX_DURATION_HOURS) {
+                                    logger.warn(`⏳ [Duration Filter] Skipping ${viewData.market_question} (Expires in ${hoursUntilEnd.toFixed(1)}h > ${MAX_DURATION_HOURS}h)`);
+                                    processedTrades.add(tradeId); // Mark as filtered to avoid re-checking
+                                    continue;
+                                }
+                            }
+                            // -------------------------------------------
+
                             // --- PRE-FLIGHT PRICE CHECK ---
                             const signalPrice = Number(trade.price || 0);
                             let executionPrice = signalPrice;
@@ -621,8 +669,13 @@ async function runBotLoop() {
                             // Actually, bet size is calculated above: const bet = portfolio.calculateBetSize(pf.balance, evalResult.score);
                             // We need to update that call to include category.
 
-                            // RE-CALCULATE BET SIZE WITH CATEGORY
-                            const smartBet = portfolio.calculateBetSize(pf.balance, evalResult.score, cat);
+                            // RE-CALCULATE BET SIZE WITH KELLY CRITERION & FLASH BOOST
+                            let hRem = 999;
+                            if (marketDetails && marketDetails.end_date_iso) {
+                                const endDate = new Date(marketDetails.end_date_iso);
+                                hRem = (endDate - new Date()) / (1000 * 60 * 60);
+                            }
+                            const smartBet = portfolio.calculateBetSize(pf.balance, evalResult.score, cat, executionPrice, hRem);
 
                             if (smartBet > 0) {
                                 const success = await db.executeAtomicBet(user.chat_id, strat.id, viewData._signalId, smartBet, logData);

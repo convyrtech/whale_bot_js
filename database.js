@@ -10,7 +10,7 @@ function addColumnIfMissing(table, column, definition) {
             if (err) return reject(err);
             const exists = (rows || []).some(r => r.name === column);
             if (exists) return resolve(false);
-            db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`, [], function(e) {
+            db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`, [], function (e) {
                 if (e) return reject(e);
                 resolve(true);
             });
@@ -84,28 +84,29 @@ function initDb() {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
- 
+
         // Migrations (idempotent)
-        addColumnIfMissing('users', 'filter_market_category', `TEXT DEFAULT 'all'`).catch(() => {});
-        addColumnIfMissing('users', 'strategy_name', `TEXT DEFAULT 'custom'`).catch(() => {});
-        addColumnIfMissing('users', 'virtual_stake_usd', `INTEGER DEFAULT 100`).catch(() => {});
-        addColumnIfMissing('users', 'filter_winrate_min_percent', `INTEGER DEFAULT 0`).catch(() => {});
-        addColumnIfMissing('users', 'filter_winrate_max_percent', `INTEGER DEFAULT 100`).catch(() => {});
-        addColumnIfMissing('signals', 'event_slug', `TEXT`).catch(() => {});
-        addColumnIfMissing('signals', 'size_usd', `REAL`).catch(() => {});
-        addColumnIfMissing('signals', 'entry_price', `REAL`).catch(() => {});
-        addColumnIfMissing('signals', 'whale_address', `TEXT`).catch(() => {});
-        addColumnIfMissing('signals', 'token_index', `INTEGER`).catch(() => {});
-        addColumnIfMissing('user_signal_logs', 'token_index', `INTEGER`).catch(() => {});
-        addColumnIfMissing('user_signal_logs', 'is_notified_closed', `INTEGER DEFAULT 0`).catch(() => {});
-        addColumnIfMissing('user_signal_logs', 'notified', `INTEGER DEFAULT 0`).catch(() => {});
-        addColumnIfMissing('user_signal_logs', 'exit_price', `REAL`).catch(() => {});
-        addColumnIfMissing('user_signal_logs', 'analysis_meta', `TEXT`).catch(() => {});
-        addColumnIfMissing('user_signal_logs', 'bet_amount', `REAL DEFAULT 0`).catch(() => {});
-        addColumnIfMissing('signals', 'transaction_hash', `TEXT`).catch(() => {});
-        db.run(`ALTER TABLE users ADD COLUMN filter_market_category TEXT DEFAULT 'all'`, () => {});
-        db.run(`ALTER TABLE users ADD COLUMN strategy_name TEXT DEFAULT 'custom'`, () => {});
-        db.run(`ALTER TABLE users ADD COLUMN virtual_stake_usd INTEGER DEFAULT 100`, () => {});
+        addColumnIfMissing('users', 'filter_market_category', `TEXT DEFAULT 'all'`).catch(() => { });
+        addColumnIfMissing('users', 'strategy_name', `TEXT DEFAULT 'custom'`).catch(() => { });
+        addColumnIfMissing('users', 'virtual_stake_usd', `INTEGER DEFAULT 100`).catch(() => { });
+        addColumnIfMissing('users', 'filter_winrate_min_percent', `INTEGER DEFAULT 0`).catch(() => { });
+        addColumnIfMissing('users', 'filter_winrate_max_percent', `INTEGER DEFAULT 100`).catch(() => { });
+        addColumnIfMissing('signals', 'event_slug', `TEXT`).catch(() => { });
+        addColumnIfMissing('signals', 'size_usd', `REAL`).catch(() => { });
+        addColumnIfMissing('signals', 'entry_price', `REAL`).catch(() => { });
+        addColumnIfMissing('signals', 'whale_address', `TEXT`).catch(() => { });
+        addColumnIfMissing('signals', 'token_index', `INTEGER`).catch(() => { });
+        addColumnIfMissing('user_signal_logs', 'token_index', `INTEGER`).catch(() => { });
+        addColumnIfMissing('user_signal_logs', 'is_notified_closed', `INTEGER DEFAULT 0`).catch(() => { });
+        addColumnIfMissing('user_signal_logs', 'notified', `INTEGER DEFAULT 0`).catch(() => { });
+        addColumnIfMissing('user_signal_logs', 'exit_price', `REAL`).catch(() => { });
+        addColumnIfMissing('user_signal_logs', 'analysis_meta', `TEXT`).catch(() => { });
+        addColumnIfMissing('user_signal_logs', 'bet_amount', `REAL DEFAULT 0`).catch(() => { });
+        addColumnIfMissing('user_signal_logs', 'closed_at', `DATETIME`).catch(() => { });
+        addColumnIfMissing('signals', 'transaction_hash', `TEXT`).catch(() => { });
+        db.run(`ALTER TABLE users ADD COLUMN filter_market_category TEXT DEFAULT 'all'`, () => { });
+        db.run(`ALTER TABLE users ADD COLUMN strategy_name TEXT DEFAULT 'custom'`, () => { });
+        db.run(`ALTER TABLE users ADD COLUMN virtual_stake_usd INTEGER DEFAULT 100`, () => { });
         db.run(`CREATE INDEX IF NOT EXISTS idx_signals_condition ON signals(condition_id)`);
         db.run(`CREATE INDEX IF NOT EXISTS idx_user_logs_signal ON user_signal_logs(signal_id)`);
         db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_txhash ON signals(transaction_hash)`);
@@ -121,7 +122,7 @@ function initDb() {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, strategy_id)
         )`);
-        
+
         // Positions Table - Multi-Strategy
         db.run(`CREATE TABLE IF NOT EXISTS positions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,11 +140,11 @@ function initDb() {
             exit_price REAL,
             token_index INTEGER
         )`);
-        
+
         console.log("Database initialized.");
     });
 }
- 
+
 const getUnnotifiedClosedSignals = () => {
     return new Promise((resolve, reject) => {
         db.all(
@@ -164,7 +165,7 @@ const markUserSignalLogNotified = (id) => {
         db.run(
             `UPDATE user_signal_logs SET is_notified_closed = 1 WHERE id = ?`,
             [id],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.changes);
             }
@@ -185,7 +186,7 @@ const getUser = (chatId) => {
 
 const createUser = (chatId) => {
     return new Promise((resolve, reject) => {
-        db.run("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", [chatId], function(err) {
+        db.run("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", [chatId], function (err) {
             if (err) reject(err);
             resolve(this.lastID);
         });
@@ -196,9 +197,9 @@ const updateUser = (chatId, params) => {
     const keys = Object.keys(params);
     const values = Object.values(params);
     const setString = keys.map(k => `${k} = ?`).join(', ');
-    
+
     return new Promise((resolve, reject) => {
-        db.run(`UPDATE users SET ${setString} WHERE chat_id = ?`, [...values, chatId], function(err) {
+        db.run(`UPDATE users SET ${setString} WHERE chat_id = ?`, [...values, chatId], function (err) {
             if (err) reject(err);
             resolve(this.changes);
         });
@@ -231,7 +232,7 @@ const saveSignal = (data) => {
         db.run(
             `INSERT INTO signals (market_slug, event_slug, condition_id, outcome, side, entry_price, size_usd, whale_address, token_index, transaction_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [market_slug, event_slug, condition_id, outcome, side, entry_price, size_usd, whale_address, token_index ?? null, transaction_hash ?? null],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.lastID);
             }
@@ -245,7 +246,7 @@ const logUserSignal = (chatId, signalId, data) => {
         db.run(
             `INSERT INTO user_signal_logs (signal_id, chat_id, strategy, side, entry_price, size_usd, bet_amount, category, league, outcome, token_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [signalId, chatId, strategy, side, entry_price, size_usd, bet_amount ?? 0, category, league, outcome, token_index ?? null],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.lastID);
             }
@@ -268,7 +269,7 @@ const updateSignalResult = (id, resultData) => {
         db.run(
             `UPDATE signals SET status = ?, result_pnl_percent = ?, resolved_outcome = ? WHERE id = ?`,
             [status, result_pnl_percent, resolved_outcome, id],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.changes);
             }
@@ -282,7 +283,7 @@ const updateUserSignalResultsBySignalId = (signalId, resultData) => {
         db.run(
             `UPDATE user_signal_logs SET status = ?, result_pnl_percent = ?, resolved_outcome = ? WHERE signal_id = ?`,
             [status, result_pnl_percent, resolved_outcome, signalId],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.changes);
             }
@@ -295,7 +296,7 @@ const updateSignalConditionId = (id, conditionId) => {
         db.run(
             `UPDATE signals SET condition_id = ? WHERE id = ?`,
             [conditionId, id],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.changes);
             }
@@ -308,14 +309,14 @@ const logAction = (chatId, action, payload) => {
         db.run(
             `INSERT INTO user_actions (chat_id, action, payload) VALUES (?, ?, ?)`,
             [chatId, action, JSON.stringify(payload || {})],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.lastID);
             }
         );
     });
 };
- 
+
 const getSignalStats = (days = 30) => {
     // Enhanced stats with median, buy/sell split, and pending count.
     return new Promise((resolve, reject) => {
@@ -330,8 +331,8 @@ const getSignalStats = (days = 30) => {
                 if (err) return reject(err);
                 const total = rows.length;
                 if (total === 0) {
-                    return resolve({ 
-                        total: 0, wins: 0, winrate: 0, 
+                    return resolve({
+                        total: 0, wins: 0, winrate: 0,
                         avg_pnl: 0, avg_pnl_capped: 0, median_pnl: 0,
                         buy_count: 0, buy_wins: 0, buy_winrate: 0,
                         sell_count: 0, sell_wins: 0, sell_winrate: 0,
@@ -346,20 +347,20 @@ const getSignalStats = (days = 30) => {
                     const capped = x > 1000 ? 1000 : (x < -1000 ? -1000 : x);
                     return acc + capped;
                 }, 0);
-                
+
                 // Calculate median
                 const sortedPnls = [...pnls].sort((a, b) => a - b);
                 const mid = Math.floor(sortedPnls.length / 2);
-                const median = sortedPnls.length % 2 !== 0 
-                    ? sortedPnls[mid] 
+                const median = sortedPnls.length % 2 !== 0
+                    ? sortedPnls[mid]
                     : (sortedPnls[mid - 1] + sortedPnls[mid]) / 2;
-                
+
                 // Buy/Sell split
                 const buyRows = rows.filter(r => (r.side || 'BUY').toUpperCase() === 'BUY');
                 const sellRows = rows.filter(r => (r.side || 'BUY').toUpperCase() === 'SELL');
                 const buyWins = buyRows.filter(r => Number(r.result_pnl_percent || 0) > 0).length;
                 const sellWins = sellRows.filter(r => Number(r.result_pnl_percent || 0) > 0).length;
-                
+
                 // Get pending count
                 db.get(
                     `SELECT COUNT(*) as pending FROM user_signal_logs WHERE status = 'OPEN'`,
@@ -565,7 +566,7 @@ const closePosition = (id, exitPrice) => {
                  result_pnl_percent = ((? - entry_price) / entry_price) * 100
              WHERE id = ?`,
             [exitPrice, exitPrice, id],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.changes > 0);
             }
@@ -592,7 +593,7 @@ const updateUserSignalLogById = (id, resultData) => {
         db.run(
             `UPDATE user_signal_logs SET status = ?, result_pnl_percent = ?, resolved_outcome = ? WHERE id = ?`,
             [status, result_pnl_percent, resolved_outcome, id],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(this.changes);
             }
@@ -606,7 +607,7 @@ const saveCallbackPayload = (payload) => {
         db.run(
             `INSERT INTO callback_payloads (id, payload) VALUES (?, ?)`,
             [id, JSON.stringify(payload || {})],
-            function(err) {
+            function (err) {
                 if (err) reject(err);
                 resolve(id);
             }
@@ -616,12 +617,56 @@ const saveCallbackPayload = (payload) => {
 
 // --- Portfolio Functions ---
 
+const getDurationBucketStats = (days = 30) => {
+    return new Promise((resolve, reject) => {
+        // We use created_at vs resolution_time or market duration if available
+        // But simpler: we use our analysis_meta which likely contains price/score.
+        // Wait, for historical trades, we didn't always log hoursRem.
+        // We can estimate duration if we have resolution_time.
+        // Let's check user_signal_logs columns.
+        db.all(
+            `SELECT 
+                CASE 
+                    WHEN (strftime('%s', closed_at) - strftime('%s', created_at)) / 3600 < 6 THEN '⚡ Flash (<6h)'
+                    WHEN (strftime('%s', closed_at) - strftime('%s', created_at)) / 3600 < 24 THEN '⏳ Day (6-24h)'
+                    ELSE '🗓️ Swing (>24h)'
+                END as bucket,
+                COUNT(*) as total,
+                SUM(CASE WHEN result_pnl_percent > 0 THEN 1 ELSE 0 END) as wins,
+                AVG(result_pnl_percent) as avg_roi,
+                AVG(CASE 
+                      WHEN result_pnl_percent > 1000 THEN 1000
+                      WHEN result_pnl_percent < -1000 THEN -1000
+                      ELSE result_pnl_percent
+                    END) as avg_roi_capped
+             FROM user_signal_logs
+             WHERE status = 'CLOSED' AND created_at >= datetime('now', '-' || ? || ' days')
+             GROUP BY bucket
+             ORDER BY total DESC`,
+            [days],
+            (err, rows) => {
+                if (err) reject(err);
+                resolve(rows || []);
+            }
+        );
+    });
+};
+
+const getUserPortfolios = (chatId) => {
+    return new Promise((resolve, reject) => {
+        db.all(`SELECT * FROM strategy_portfolios WHERE user_id = ?`, [chatId], (err, rows) => {
+            if (err) reject(err);
+            resolve(rows);
+        });
+    });
+};
+
 function initPortfolio(chatId, strategyId) {
     return new Promise((resolve, reject) => {
         db.run(
             `INSERT OR IGNORE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) VALUES (?, ?, 100.0, 0.0, 1)`,
             [chatId, strategyId],
-            function(err) {
+            function (err) {
                 if (err) return reject(err);
                 resolve(this.changes);
             }
@@ -651,7 +696,7 @@ function updatePortfolio(chatId, strategyId, { balanceDelta = 0, lockedDelta = 0
                  updated_at = CURRENT_TIMESTAMP 
              WHERE user_id = ? AND strategy_id = ?`,
             [balanceDelta, lockedDelta, chatId, strategyId],
-            function(err) {
+            function (err) {
                 if (err) return reject(err);
                 resolve(this.changes);
             }
@@ -664,7 +709,7 @@ function updateBalance(chatId, strategyId, newBalance) {
         db.run(
             `UPDATE strategy_portfolios SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND strategy_id = ?`,
             [newBalance, chatId, strategyId],
-            function(err) {
+            function (err) {
                 if (err) return reject(err);
                 resolve(this.changes);
             }
@@ -677,7 +722,7 @@ const getCallbackPayload = (id) => {
         db.get(
             `SELECT payload FROM callback_payloads WHERE id = ?`,
             [id],
-            function(err, row) {
+            function (err, row) {
                 if (err) reject(err);
                 resolve(row ? JSON.parse(row.payload) : null);
             }
@@ -727,6 +772,8 @@ module.exports = {
     updateSignalConditionId,
     getUnnotifiedClosedSignals,
     markUserSignalLogNotified,
+    getDurationBucketStats,
+    getUserPortfolios,
     initPortfolio,
     getPortfolio,
     updateBalance,
@@ -751,9 +798,9 @@ module.exports = {
                         SET balance = balance - ?, 
                             locked = locked + ?, 
                             updated_at = CURRENT_TIMESTAMP 
-                        WHERE user_id = ? AND strategy_id = ?`, 
-                    [betAmount, betAmount, userId, strategyId], 
-                    function(err) {
+                        WHERE user_id = ? AND strategy_id = ?`,
+                    [betAmount, betAmount, userId, strategyId],
+                    function (err) {
                         if (err) {
                             console.error("Transaction Error (Update Portfolio):", err);
                             db.run("ROLLBACK");
@@ -769,25 +816,25 @@ module.exports = {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')`);
 
                 stmt.run(
-                    userId, 
-                    signalId, 
+                    userId,
+                    signalId,
                     strategyId, // Use strategyId here for consistency
-                    logData.side, 
-                    logData.entry_price, 
-                    logData.size_usd, 
+                    logData.side,
+                    logData.entry_price,
+                    logData.size_usd,
                     betAmount, // Explicitly logging the bet amount
-                    logData.category, 
-                    logData.league, 
-                    logData.outcome, 
+                    logData.category,
+                    logData.league,
+                    logData.outcome,
                     logData.token_index,
                     JSON.stringify(logData.analysis_meta || null),
-                    function(err) {
+                    function (err) {
                         if (err) {
                             console.error("Transaction Error (Log Signal):", err);
                             db.run("ROLLBACK");
                             return reject(err);
                         }
-                        
+
                         // 3. Commit if both succeeded
                         db.run("COMMIT", (commitErr) => {
                             if (commitErr) {
@@ -813,7 +860,7 @@ module.exports = {
     logShadowBet: (signalId, tradeData, analysisMeta = null) => {
         return new Promise((resolve, reject) => {
             // Use a fixed virtual user ID for mining (e.g., 0 or a specific admin ID)
-            const systemMiningId = 0; 
+            const systemMiningId = 0;
             const virtualBet = 10; // Fixed $10 virtual bet for ROI calc
 
             db.run(
@@ -822,19 +869,19 @@ module.exports = {
                     bet_amount, category, league, outcome, token_index, analysis_meta, status, notified
                 ) VALUES (?, ?, 'shadow_mining', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 1)`,
                 [
-                    systemMiningId, 
-                    signalId, 
-                    tradeData.side, 
-                    tradeData.entry_price, 
-                    tradeData.size_usd, 
+                    systemMiningId,
+                    signalId,
+                    tradeData.side,
+                    tradeData.entry_price,
+                    tradeData.size_usd,
                     virtualBet,
-                    tradeData.category, 
-                    tradeData.league, 
-                    tradeData.outcome, 
+                    tradeData.category,
+                    tradeData.league,
+                    tradeData.outcome,
                     tradeData.token_index,
                     JSON.stringify(analysisMeta)
                 ],
-                function(err) {
+                function (err) {
                     if (err) return reject(err);
                     resolve(this.lastID);
                 }
@@ -884,7 +931,7 @@ module.exports = {
                 // 1. Calculate PnL
                 // If exitPrice is 1 (Win), PnL% = ((1 - Entry) / Entry) * 100
                 // If exitPrice is 0 (Loss), PnL% = -100
-                
+
                 // 2. Update Log
                 db.run(
                     `UPDATE user_signal_logs 
@@ -895,7 +942,7 @@ module.exports = {
                          result_pnl_percent = ((? - entry_price) / entry_price) * 100
                      WHERE id = ?`,
                     [exitPrice, resolvedOutcome, exitPrice, id],
-                    function(err) {
+                    function (err) {
                         if (err) {
                             db.run("ROLLBACK");
                             return reject(err);
@@ -909,20 +956,20 @@ module.exports = {
                 // Note: We already deducted BetAmount from balance.
                 // So we just add the payout.
                 // Payout = (BetAmount / EntryPrice) * ExitPrice
-                
+
                 // Safety check for division by zero (shouldn't happen with entry_price > 0)
                 // We'll do the math in JS before calling this, but let's assume valid inputs.
-                
+
                 // Wait, we need to read entry_price to calculate payout inside SQL? 
                 // Easier to pass the calculated payout amount.
                 // Let's change the signature or do a read first. 
                 // Actually, the caller (index.js) should calculate the payout.
-                
+
                 // Let's assume the caller passes 'payoutAmount'.
             });
         });
     },
-    
+
     // Simpler version: just update status and let caller handle portfolio update via updatePortfolio
     markPositionSettled: (id, exitPrice, resolvedOutcome) => {
         return new Promise((resolve, reject) => {
@@ -935,7 +982,7 @@ module.exports = {
                      result_pnl_percent = ((? - entry_price) / entry_price) * 100
                  WHERE id = ?`,
                 [exitPrice, resolvedOutcome, exitPrice, id],
-                function(err) {
+                function (err) {
                     if (err) return reject(err);
                     resolve(this.changes);
                 }
@@ -954,7 +1001,7 @@ module.exports = {
                      result_pnl_percent = ((? - entry_price) / entry_price) * 100
                  WHERE id = ? AND strategy = 'shadow_mining'`,
                 [exitPrice, resolvedOutcome, exitPrice, id],
-                function(err) {
+                function (err) {
                     if (err) return reject(err);
                     resolve(this.changes);
                 }
@@ -1012,12 +1059,12 @@ module.exports = {
         return new Promise((resolve, reject) => {
             db.serialize(() => {
                 db.run("BEGIN TRANSACTION");
-                
+
                 if (strategyId) {
                     // Reset Specific Strategy
                     db.run(`INSERT OR REPLACE INTO strategy_portfolios (user_id, strategy_id, balance, locked, is_challenge_active) 
                             VALUES (?, ?, 100.0, 0.0, 1)`, [chatId, strategyId]);
-                    
+
                     db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
                             WHERE chat_id = ? AND strategy = ? AND status = 'OPEN'`, [chatId, strategyId]);
                 } else {
@@ -1026,7 +1073,7 @@ module.exports = {
                     // Better: Delete all portfolio rows for this user and re-init them later, OR update them all.
                     // Let's update all existing rows in strategy_portfolios.
                     db.run(`UPDATE strategy_portfolios SET balance = 100.0, locked = 0.0, is_challenge_active = 1 WHERE user_id = ?`, [chatId]);
-                    
+
                     // Close ALL open positions for this user
                     db.run(`UPDATE user_signal_logs SET status = 'CLOSED_RESET', resolved_outcome = 'RESET' 
                             WHERE chat_id = ? AND status = 'OPEN'`, [chatId]);
@@ -1045,7 +1092,7 @@ module.exports = {
     toggleStrategy: (chatId, strategyId, isActive) => {
         return new Promise((resolve, reject) => {
             const val = isActive ? 1 : 0;
-            db.run(`UPDATE strategy_portfolios SET is_challenge_active = ? WHERE user_id = ? AND strategy_id = ?`, [val, chatId, strategyId], function(err) {
+            db.run(`UPDATE strategy_portfolios SET is_challenge_active = ? WHERE user_id = ? AND strategy_id = ?`, [val, chatId, strategyId], function (err) {
                 if (err) return reject(err);
                 resolve(this.changes);
             });
@@ -1077,7 +1124,7 @@ module.exports = {
             );
         });
     },
-    
+
     anyUserHasPosition: (conditionId) => {
         return new Promise((resolve, reject) => {
             db.get(
@@ -1119,7 +1166,7 @@ module.exports = {
                      result_pnl_percent = ((? - entry_price) / entry_price) * 100
                  WHERE id = ?`,
                 [exitPrice, exitPrice, logId],
-                function(err) {
+                function (err) {
                     if (err) return reject(err);
                     resolve(this.changes > 0);
                 }

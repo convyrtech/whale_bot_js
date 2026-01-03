@@ -107,6 +107,7 @@ async function fetchHistoryGraphQL(userId) {
     const query = `
         query GetUserHistory($id: ID!) {
             user(id: $id) {
+                # Get PnL data
                 userPositions(first: 200, orderBy: updated, orderDirection: desc) {
                     buyAmount
                     sellAmount
@@ -117,12 +118,16 @@ async function fetchHistoryGraphQL(userId) {
                     }
                 }
             }
+            # Get First Transaction for Account Age
+            transactions(first: 1, orderBy: timestamp, orderDirection: asc, where: { user: $id }) {
+                timestamp
+            }
         }
     `;
 
     // Use the first valid endpoint from our list (or just the main one)
     const endpoint = 'https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/polymarket/prod/gn';
-    
+
     const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -134,7 +139,16 @@ async function fetchHistoryGraphQL(userId) {
     if (!json.data || !json.data.user) return null;
 
     const positions = json.data.user.userPositions || [];
-    if (positions.length === 0) return null;
+    const firstTx = (json.data.transactions && json.data.transactions[0]) ? json.data.transactions[0] : null;
+
+    // Calculate Account Age
+    let firstTradeTimestamp = 0;
+    if (firstTx) {
+        firstTradeTimestamp = Number(firstTx.timestamp) * 1000;
+        logger.debug(`[Stats] Wallet ${userId} Age: ${((Date.now() - firstTradeTimestamp) / (86400000)).toFixed(1)} days`);
+    }
+
+    if (positions.length === 0 && firstTradeTimestamp === 0) return null;
 
     let items = [];
 
@@ -142,13 +156,13 @@ async function fetchHistoryGraphQL(userId) {
         const bought = Number(pos.buyAmount) || 0;
         const sold = Number(pos.sellAmount) || 0;
         const payout = Number(pos.payout) || 0;
-        
+
         // Only count closed or partially closed positions for PnL
         if (sold > 0 || payout > 0) {
             const profit = (sold + payout) - bought;
             const market = pos.market || {};
             const cat = categorizeMarket(market.question, market.slug);
-            
+
             items.push({
                 pnl: profit,
                 volume: bought,
@@ -158,7 +172,10 @@ async function fetchHistoryGraphQL(userId) {
         }
     }
 
-    return calculateStats(items);
+
+    const result = calculateStats(items);
+    result.firstTradeTimestamp = firstTradeTimestamp;
+    return result;
 }
 
 // Helper: Data API
@@ -184,7 +201,7 @@ async function fetchHistoryDataApi(userId) {
         const pnl = Number(p.cashPnl) || 0;
         const market = p.market || {};
         const cat = categorizeMarket(market.question, market.slug);
-        
+
         items.push({
             pnl: pnl,
             volume: 0, // Volume handled by trades
@@ -200,9 +217,9 @@ async function fetchHistoryDataApi(userId) {
     // Let's try to extract category from trades for volume tracking.
     let volumeByCat = {};
     let totalVolume = 0;
-    
+
     for (const t of trades) {
-        const vol = (Number(t.price||0) * Number(t.size||0));
+        const vol = (Number(t.price || 0) * Number(t.size || 0));
         totalVolume += vol;
         const cat = categorizeMarket(t.title, t.slug);
         volumeByCat[cat] = (volumeByCat[cat] || 0) + vol;
@@ -214,10 +231,10 @@ async function fetchHistoryDataApi(userId) {
     // Let's just pass the items we have from positions for PnL/Winrate, 
     // and pass a separate volume map if needed.
     // Actually, calculateStats can take an optional volume override.
-    
+
     const stats = calculateStats(items);
     stats.global.totalVolume = totalVolume; // Override global volume with trade volume
-    
+
     // Update category volumes
     for (const [cat, vol] of Object.entries(volumeByCat)) {
         if (stats[cat]) stats[cat].totalVolume = vol;
@@ -254,7 +271,7 @@ function calculateStats(items) {
     // Calculate for each group
     for (const [cat, groupItems] of Object.entries(groups)) {
         if (!result[cat]) result[cat] = { pnl: 0, medianPnl: 0, winrate: 0, winrateLowerBound: 0, totalVolume: 0, totalTrades: 0 };
-        
+
         const count = groupItems.length;
         if (count === 0) continue;
 
@@ -283,7 +300,7 @@ function calculateStats(items) {
         if (count > 0) {
             const z = 1.96;
             const phat = wins / count;
-            const lowerBound = (phat + z*z/(2*count) - z * Math.sqrt((phat*(1-phat)+z*z/(4*count))/count)) / (1 + z*z/count);
+            const lowerBound = (phat + z * z / (2 * count) - z * Math.sqrt((phat * (1 - phat) + z * z / (4 * count)) / count)) / (1 + z * z / count);
             winrateLowerBound = Math.max(0, lowerBound * 100);
         }
 
@@ -320,13 +337,13 @@ async function generateCardImage(data) {
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
-    
+
     // Determine colors based on PnL
     let color = '#2ea043'; // Green
     let color_dark = '#238636';
     let bg_color = 'rgba(46, 160, 67, 0.15)';
     let pnl_class = 'green';
-    
+
     if (data.pnl < 0) {
         color = '#f85149'; // Red
         color_dark = '#da3633';
@@ -418,11 +435,11 @@ async function generateCardImage(data) {
     </body>
     </html>
     `;
-    
+
     await page.setContent(htmlContent);
     const element = await page.$('.card');
     const imageBuffer = await element.screenshot({ type: 'png' });
-    
+
     await browser.close();
     return imageBuffer;
 }
@@ -432,12 +449,12 @@ function categorizeMarket(title, slug) {
     const t = (title || '').toLowerCase();
     const s = (slug || '').toLowerCase();
     const text = t + ' ' + s;
-    
+
     if (text.includes('bitcoin') || text.includes('ethereum') || text.includes('crypto') || text.includes('btc') || text.includes('eth') || text.includes('solana') || text.includes('price')) return 'crypto';
     if (text.includes('trump') || text.includes('harris') || text.includes('election') || text.includes('president') || text.includes('senate') || text.includes('democrat') || text.includes('republican')) return 'politics';
     if (text.includes('nfl') || text.includes('nba') || text.includes('football') || text.includes('soccer') || text.includes('game') || text.includes('winner') || text.includes('champions')) return 'sports';
     if (text.includes('temperature') || text.includes('rain') || text.includes('hurricane') || text.includes('weather') || text.includes('snow')) return 'weather';
-    
+
     return 'other';
 }
 
@@ -459,7 +476,7 @@ async function fetchCurrentPrice(conditionId, outcome) {
         // Using Data API to get market details
         const response = await fetch(`${API_BASE_URL}/markets?condition_id=${conditionId}`);
         if (!response.ok) return null;
-        
+
         const data = await response.json();
         if (!data || data.length === 0) return null;
 
@@ -479,37 +496,38 @@ async function fetchCurrentPrice(conditionId, outcome) {
 }
 
 // 6. Check Market Resolution
+// 6. Fetch Market Details (CLOB API - More Reliable for Metadata)
+async function fetchMarketDetails(conditionId) {
+    try {
+        const response = await fetch(`https://clob.polymarket.com/markets/${conditionId}`);
+        if (!response.ok) return null;
+        return await response.json();
+    } catch (e) {
+        logger.error(`[Market Details] Error for ${conditionId}: ${e.message}`);
+        return null;
+    }
+}
+
+// 7. Check Market Resolution
 async function fetchMarketStatus(conditionId) {
     try {
-        const response = await fetch(`${API_BASE_URL}/markets?condition_id=${conditionId}`);
-        if (!response.ok) return null;
-        const data = await response.json();
-        if (!data || data.length === 0) return null;
-        
-        const m = data[0];
+        // Use CLOB API via fetchMarketDetails
+        const m = await fetchMarketDetails(conditionId);
+        if (!m) return null;
+
         // Check if resolved
-        if (m.closed || m.resolvedBy) {
-            // Need to find the winning outcome
-            // Usually 'tokens' has 'winner': true or similar, OR we check 'question' logic.
-            // Polymarket API: 'tokens' array might have 'winner' boolean?
-            // Or check 'outcomes' field?
-            // Actually, for binary markets, if it's resolved, we need to know WHICH outcome won.
-            
-            // Let's look at the tokens.
-            // Sometimes tokens have `winner: true`.
+        if (m.closed || m.resolved_by) { // CLOB uses resolved_by (snake_case) or we check tokens
             if (m.tokens) {
                 const winner = m.tokens.find(t => t.winner === true);
                 if (winner) return { resolved: true, winnerOutcome: winner.outcome };
             }
-            
-            // Fallback: Check `market.outcomes` and `market.outcomePrices`?
-            // If price is 1.0, it won.
+            // Fallback: Check if one outcome price is 1.0 (CLOB sometimes doesn't mark winner explicitly in tokens immediately)
             if (m.tokens) {
-                const winnerByPrice = m.tokens.find(t => Number(t.price) === 1);
+                const winnerByPrice = m.tokens.find(t => Number(t.price) >= 0.999);
                 if (winnerByPrice) return { resolved: true, winnerOutcome: winnerByPrice.outcome };
             }
         }
-        
+
         return { resolved: false };
     } catch (e) {
         logger.error(`[Resolution Check] Error for ${conditionId}: ${e.message}`);
@@ -526,5 +544,6 @@ module.exports = {
     extractLeague,
     fetchCurrentPrice,
     fetchMarketStatus,
+    fetchMarketDetails,
     getWhaleCacheSize: () => whaleCache.size
 };
