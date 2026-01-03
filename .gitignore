@@ -7,8 +7,10 @@
 
 # Databases & Data
 *.db
+*.sqlite
 *.db-journal
 *.db-wal
+*.db-shm
 *.csv
 /data
 /backups
